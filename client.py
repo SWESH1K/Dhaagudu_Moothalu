@@ -16,7 +16,10 @@ class Game:
         self.clock = pygame.time.Clock()
         self.network = Network(server, port)
         self.running = True
-        self.start_pos = self.read_pos(self.network.getPos())
+        # read_pos now returns (x, y, state, frame). For initial spawn we only
+        # need the x,y center coordinates for Player creation.
+        sp = self.read_pos(self.network.getPos())
+        self.start_pos = (sp[0], sp[1])
 
 
         # Sprite Groups
@@ -30,11 +33,23 @@ class Game:
         self.setup()
 
     def read_pos(self, pos):
-        x, y = map(int, pos.split(","))
-        return (x, y)
+        parts = pos.split(",")
+        x = int(parts[0])
+        y = int(parts[1])
+        if len(parts) >= 4:
+            state = parts[2]
+            try:
+                frame = int(parts[3])
+            except Exception:
+                frame = 0
+        else:
+            state = 'down'
+            frame = 0
+        return (x, y, state, frame)
     
     def make_pos(self, tup):
-        return str(tup[0]) + "," + str(tup[1])
+        # join any number of elements into comma-separated string
+        return ",".join(map(str, tup))
 
     def setup(self):
         map = load_pygame(join("data", "maps", "world.tmx"))
@@ -83,20 +98,20 @@ class Game:
                 if event.type == pygame.QUIT:
                     self.running = False
 
-            # Send the player's hitbox center so server and other clients use the
-            # same coordinate anchor (center) — previously rect.x/rect.y were
-            # top-left which caused inconsistent interpretation on the remote
-            # side and made positions appear out of sync.
+            # Send the player's hitbox center + animation state/frame so the
+            # remote client can show correct animation. We'll send a 4-part
+            # payload: x,y,state,frame
             px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
-            player2_pos = self.read_pos(self.network.send(self.make_pos((px, py))))
-            # update remote player's position via its hitbox so collisions/display stay consistent
-            try:
-                self.player2.hitbox.center = player2_pos
-                self.player2.rect.center = self.player2.hitbox.center
-            except Exception:
-                # fall back to rect assignment if hitbox isn't available for some reason
-                self.player2.rect.x = player2_pos[0]
-                self.player2.rect.y = player2_pos[1]
+            payload = (px, py, self.player.state, int(self.player.frame_index))
+            resp = self.network.send(self.make_pos(payload))
+            if resp:
+                x, y, state, frame = self.read_pos(resp)
+                # apply remote state (position + animation)
+                try:
+                    self.player2.set_remote_state((x, y), state, frame)
+                except Exception:
+                    # fallback: set rect directly
+                    self.player2.rect.center = (x, y)
 
             # update
             self.all_sprites.update(dt)

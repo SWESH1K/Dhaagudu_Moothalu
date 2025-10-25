@@ -12,24 +12,36 @@ except socket.error as e:
     print(str(e))
 
 def read_pos(data):
-    data = data.split(",")
-    return int(data[0]), int(data[1])
+    parts = data.split(",")
+    x = int(parts[0])
+    y = int(parts[1])
+    if len(parts) >= 4:
+        state = parts[2]
+        try:
+            frame = int(parts[3])
+        except Exception:
+            frame = 0
+    else:
+        state = 'down'
+        frame = 0
+    return (x, y, state, frame)
 
 def make_pos(tup):
-    # print("Tup=", tup)
-    return str(tup[0]) + "," + str(tup[1])
+    # join any tuple elements into comma-separated string
+    return ",".join(map(str, tup))
 
 s.listen(2)
 print("Waiting for a connection, Server Started")
 
-pos = [(1272, 2018), (1272, 2018)]
+pos = [(1272, 2018, 'down', 0), (1272, 2018, 'down', 0)]
 
 def threaded_client(conn, player):
     conn.send(str.encode(make_pos(pos[player])))
     reply = "" 
     while True:
         try:
-            data = read_pos(conn.recv(2048).decode("utf-8"))
+            raw = conn.recv(2048).decode("utf-8")
+            data = read_pos(raw)
             pos[player] = data
             print("data=", data)
  

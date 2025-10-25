@@ -113,3 +113,32 @@ class Player(pygame.sprite.Sprite):
             except Exception:
                 # Fall back to rect center if hitbox not set
                 pass
+
+    def set_remote_state(self, pos, state, frame_index):
+        """Apply remote player's position and animation state.
+
+        pos: (x, y) tuple (center coordinates)
+        state: animation state string ('up','down','left','right')
+        frame_index: integer frame index (will be clamped)
+        """
+        # Update position (prefer hitbox if available)
+        try:
+            self.hitbox.center = (int(pos[0]), int(pos[1]))
+            self.rect.center = self.hitbox.center
+        except Exception:
+            self.rect.center = (int(pos[0]), int(pos[1]))
+
+        # Update animation state/frame
+        if state in self.frames:
+            self.state = state
+
+        try:
+            fi = int(frame_index)
+        except Exception:
+            fi = 0
+
+        # Clamp frame index and set image immediately so remote animation is visible
+        frames_list = self.frames.get(self.state)
+        if frames_list:
+            self.frame_index = fi % len(frames_list)
+            self.image = frames_list[int(self.frame_index) % len(frames_list)]
