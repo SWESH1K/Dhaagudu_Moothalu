@@ -234,6 +234,28 @@ class Game:
         self._last_whistle_volume = None
         self._last_whistle_pan = 0.0
         self._last_whistle_time = 0
+        # background ambience: looped beach sound
+        try:
+            bg_path = join("sounds", "beach_background.mp3")
+            # use music module for long, looped background audio
+            try:
+                pygame.mixer.music.load(bg_path)
+                pygame.mixer.music.set_volume(0.4)
+                pygame.mixer.music.play(-1)  # loop indefinitely
+            except Exception:
+                # fall back to a Sound object if music fails
+                try:
+                    self._bg_sound = pygame.mixer.Sound(bg_path)
+                    ch = pygame.mixer.find_channel()
+                    if ch:
+                        ch.play(self._bg_sound, loops=-1)
+                        ch.set_volume(0.4)
+                    else:
+                        self._bg_sound.play(loops=-1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def read_pos(self, pos):
         parts = pos.split(",")

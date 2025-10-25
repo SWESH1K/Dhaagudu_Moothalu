@@ -37,6 +37,18 @@ class Player(pygame.sprite.Sprite):
         # Whether this player is frozen (caught by seeker). Frozen players cannot move
         # or transform and should display a freeze message on their client.
         self._frozen = False
+        # walking sound (loop while moving) - best-effort load
+        try:
+            self._walk_sound = pygame.mixer.Sound(join("sounds", "walking_sound.mp3"))
+        except Exception:
+            self._walk_sound = None
+        # channel used to play walking sound (if any)
+        self._walk_channel = None
+        # shape shift sound (play once on equip/unequip)
+        try:
+            self._shape_shift_sound = pygame.mixer.Sound(join("sounds", "shape_shift.mp3"))
+        except Exception:
+            self._shape_shift_sound = None
 
     def load_images(self):
         self.frames = {
@@ -165,6 +177,52 @@ class Player(pygame.sprite.Sprite):
             self.input()
             self.move(dt)
             self.animate(dt)
+            # play/stop walking ambient when moving
+            try:
+                moving = self.direction.magnitude() > 0
+                if getattr(self, '_walk_sound', None):
+                    if moving:
+                        # if already playing on a reserved channel, ensure it's busy
+                        ch = getattr(self, '_walk_channel', None)
+                        is_busy = False
+                        try:
+                            is_busy = bool(ch and ch.get_busy())
+                        except Exception:
+                            is_busy = False
+
+                        if not is_busy:
+                            # try to find a free channel and play looped
+                            try:
+                                newch = pygame.mixer.find_channel()
+                            except Exception:
+                                newch = None
+                            try:
+                                if newch:
+                                    newch.play(self._walk_sound, loops=-1)
+                                    newch.set_volume(0.6)
+                                    self._walk_channel = newch
+                                else:
+                                    # fallback to Sound.play (may use shared channels)
+                                    self._walk_sound.play(loops=-1)
+                            except Exception:
+                                pass
+                    else:
+                        # stop any walking playback when idle
+                        try:
+                            ch = getattr(self, '_walk_channel', None)
+                            if ch:
+                                ch.stop()
+                                self._walk_channel = None
+                            else:
+                                # stop global sound if it was played that way
+                                try:
+                                    self._walk_sound.stop()
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         else:
             # For remote players we expect position to be set from network.
             # Ensure rect stays in sync with hitbox if network updates the hitbox.
@@ -208,6 +266,24 @@ class Player(pygame.sprite.Sprite):
             # fallback: don't change size if something goes wrong
             self.rect = self._saved_rect.copy()
             self.hitbox = self._saved_hitbox.copy()
+
+        # play shape shift sound once for locally controlled players
+        try:
+            if getattr(self, 'controlled', False) and getattr(self, '_shape_shift_sound', None):
+                # play once (no loops)
+                try:
+                    ch = pygame.mixer.find_channel()
+                except Exception:
+                    ch = None
+                try:
+                    if ch:
+                        ch.play(self._shape_shift_sound)
+                    else:
+                        self._shape_shift_sound.play()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # Reduce player's movement speed to 75% of original while equipped
         try:
@@ -258,6 +334,23 @@ class Player(pygame.sprite.Sprite):
             if hasattr(self, '_saved_image'):
                 del self._saved_image
             self._equipped = False
+
+            # play shape shift sound once for locally controlled players
+            try:
+                if getattr(self, 'controlled', False) and getattr(self, '_shape_shift_sound', None):
+                    try:
+                        ch = pygame.mixer.find_channel()
+                    except Exception:
+                        ch = None
+                    try:
+                        if ch:
+                            ch.play(self._shape_shift_sound)
+                        else:
+                            self._shape_shift_sound.play()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     def set_remote_state(self, pos, state, frame_index, equip_frame=0):
         """Apply remote player's position and animation state.
