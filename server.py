@@ -22,7 +22,7 @@ def make_pos(tup):
 s.listen(2)
 print("Waiting for a connection, Server Started")
 
-pos = [(0, 0), (100, 100)]
+pos = [(1272, 2018), (1272, 2018)]
 
 def threaded_client(conn, player):
     conn.send(str.encode(make_pos(pos[player])))

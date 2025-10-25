@@ -5,7 +5,7 @@ from os import walk
 
 
 class Player(pygame.sprite.Sprite):
-    def __init__(self, pos, groups, collision_sprites):
+    def __init__(self, pos, groups, collision_sprites, controlled=True):
         super().__init__(groups)
         self.load_images()
         
@@ -21,6 +21,9 @@ class Player(pygame.sprite.Sprite):
         self.direction = pygame.math.Vector2()
         self.speed = 500
         self.collision_sprites = collision_sprites
+        # Whether this player is controlled locally (reads keyboard). Remote players
+        # should be created with controlled=False so they don't respond to local input.
+        self.controlled = controlled
 
     def load_images(self):
         self.frames = {
@@ -90,13 +93,23 @@ class Player(pygame.sprite.Sprite):
                 self.frame_index = 0  # loop animation
         else:
             self.frame_index = 0  # freeze on first frame when idle
-            
+
         self.image = self.frames[self.state][int(self.frame_index) % len(self.frames[self.state])]
 
         
 
     def update(self, dt):
         """Update player movement"""
-        self.input()
-        self.move(dt)
-        self.animate(dt)
+        # Only process input/movement/animation for the locally controlled player.
+        if self.controlled:
+            self.input()
+            self.move(dt)
+            self.animate(dt)
+        else:
+            # For remote players we expect position to be set from network.
+            # Ensure rect stays in sync with hitbox if network updates the hitbox.
+            try:
+                self.rect.center = self.hitbox.center
+            except Exception:
+                # Fall back to rect center if hitbox not set
+                pass

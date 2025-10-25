@@ -1,4 +1,4 @@
-server = "192.168.137.1"
+server = "10.231.31.195"
 port = 5555
 
 WINDOW_WIDTH = 1280

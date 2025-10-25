@@ -14,17 +14,27 @@ class Game:
         self.display_surface = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         pygame.display.set_caption("Dhaagudu Moothalu")
         self.clock = pygame.time.Clock()
-        # self.network = Network(server, port)
+        self.network = Network(server, port)
         self.running = True
+        self.start_pos = self.read_pos(self.network.getPos())
+
 
         # Sprite Groups
         self.all_sprites = AllSprites()
         self.collision_sprites = pygame.sprite.Group()
 
+        self.player = Player(self.start_pos, self.all_sprites, self.collision_sprites)
+        # player2 is the remote player — don't let it read local keyboard input
+        self.player2 = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False)
+
         self.setup()
 
-        # Player
-        # self.player = Player((500, 300), self.all_sprites, self.collision_sprites)
+    def read_pos(self, pos):
+        x, y = map(int, pos.split(","))
+        return (x, y)
+    
+    def make_pos(self, tup):
+        return str(tup[0]) + "," + str(tup[1])
 
     def setup(self):
         map = load_pygame(join("data", "maps", "world.tmx"))
@@ -48,13 +58,21 @@ class Game:
                             self.collision_sprites)
             
         # Entities
-        for obj in map.get_layer_by_name("Entities"):
-            if obj.name == "Player":
-                self.player = Player((obj.x, obj.y),
-                                     self.all_sprites,
-                                     self.collision_sprites)
-            
-            
+        # for obj in map.get_layer_by_name("Entities"):
+        #     if obj.name == "Player":
+                # self.player = Player((obj.x, obj.y),
+                #                      self.all_sprites,
+                #                      self.collision_sprites)
+                # self.player = Player((500, 300),
+                #                      self.all_sprites,
+                #                      self.collision_sprites)
+                
+                # # self.other_player_pos = self.get_pos(self.network.send(self.make_pos((obj.x, obj.y))))
+                # self.other_player_pos = self.network.send(self.make_pos((obj.x, obj.y)))
+                # print("Other player pos:", self.other_player_pos)
+                # # self.player2 = Player((self.other_player_pos.x + 100, self.other_player_pos.y),
+                # #                      self.all_sprites,
+                # #                      self.collision_sprites)
 
     def run(self):
         while self.running:
@@ -65,10 +83,25 @@ class Game:
                 if event.type == pygame.QUIT:
                     self.running = False
 
+            # Send the player's hitbox center so server and other clients use the
+            # same coordinate anchor (center) — previously rect.x/rect.y were
+            # top-left which caused inconsistent interpretation on the remote
+            # side and made positions appear out of sync.
+            px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
+            player2_pos = self.read_pos(self.network.send(self.make_pos((px, py))))
+            # update remote player's position via its hitbox so collisions/display stay consistent
+            try:
+                self.player2.hitbox.center = player2_pos
+                self.player2.rect.center = self.player2.hitbox.center
+            except Exception:
+                # fall back to rect assignment if hitbox isn't available for some reason
+                self.player2.rect.x = player2_pos[0]
+                self.player2.rect.y = player2_pos[1]
+
             # update
             self.all_sprites.update(dt)
 
-            # draw
+            # draw (render the world once, centered on the local player)
             self.display_surface.fill((30, 30, 30))
             self.all_sprites.draw(self.player.rect.center)
             pygame.display.update()
