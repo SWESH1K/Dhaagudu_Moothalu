@@ -1,6 +1,7 @@
 import socket
 from _thread import *
 import sys
+import time
 from settings import *
 
 
@@ -48,12 +49,16 @@ def make_pos(tup):
 s.listen(2)
 print("Waiting for a connection, Server Started")
 
+# Server round start timestamp (epoch ms). Start at now - 30s so clients see -00:30 initially.
+ROUND_START_MS = None
+
 pos = [(1272, 2018, 'down', 0, 'None', 0), (1272, 2018, 'down', 0, 'None', 0)]
 
 def threaded_client(conn, player):
-    # send initial position plus role: first connected (player 0) is seeker
+    # send initial position plus role and round start: first connected (player 0) is seeker
     role = 'seeker' if player == 0 else 'hidder'
-    conn.send(str.encode(make_pos(pos[player]) + "," + role))
+    initial = make_pos(pos[player]) + "," + role + "," + str(ROUND_START_MS)
+    conn.send(str.encode(initial))
     reply = "" 
     while True:
         try:
@@ -72,9 +77,11 @@ def threaded_client(conn, player):
                     reply = pos[1]
 
                 print("Received: ", data)
-                print("Sending: ", reply)
+                # prepare reply augmented with role and round start so clients stay in sync
+                send_payload = make_pos(reply) + "," + role + "," + str(ROUND_START_MS)
+                print("Sending: ", send_payload)
 
-            conn.send(str.encode(make_pos(reply)))
+            conn.send(str.encode(send_payload))
         except:
             break
 
@@ -85,5 +92,11 @@ currentPlayer = 0
 while True:
     conn, addr = s.accept()
     print("Connected to: " + addr[0] + ":" + str(addr[1]))
+    # If this is the second player connecting (currentPlayer == 1 before increment),
+    # start the round now and set the ROUND_START_MS so clients see -30s initially.
+    if currentPlayer == 1:
+        ROUND_START_MS = int(time.time() * 1000) + 30000
+        print("Both players connected — starting round at", ROUND_START_MS)
+
     start_new_thread(threaded_client, (conn, currentPlayer))
     currentPlayer += 1

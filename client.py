@@ -1,5 +1,6 @@
 import pygame
 import sys
+import time
 from network import Network
 from settings import *
 from player import Player
@@ -29,8 +30,8 @@ class Game:
         self.clock = pygame.time.Clock()
         self.network = Network(server, port)
         self.running = True
-        # read_pos now returns (x, y, state, frame). For initial spawn we only
-        # need the x,y center coordinates for Player creation.
+        # read_pos now returns (x, y, state, frame, equip_id, equip_frame, role, round_start_ms).
+        # For initial spawn we only need the x,y center coordinates for Player creation.
         sp = self.read_pos(self.network.getPos())
         self.start_pos = (sp[0], sp[1])
         # optional role returned by server: 'seeker' or 'hidder'
@@ -38,6 +39,18 @@ class Game:
             self.role = sp[6]
         except Exception:
             self.role = None
+
+        # server-provided round start (epoch ms). If missing, keep as None so we can show waiting state
+        try:
+            if sp[7] is not None:
+                try:
+                    self.server_round_base = int(sp[7])
+                except Exception:
+                    self.server_round_base = None
+            else:
+                self.server_round_base = None
+        except Exception:
+            self.server_round_base = None
 
 
         # Sprite Groups
@@ -56,9 +69,11 @@ class Game:
         self.game_over = False
         self.game_over_start = None
         self.winner_text = ""
-        # Round timer: start now but display from -30 seconds so hider gets 30s to hide
-        # timer_seconds = (now - self.round_base)/1000 - 30
-        self.round_base = pygame.time.get_ticks()
+        # Round timer base (server-provided epoch ms)
+        self.round_base = self.server_round_base
+        # round stopped flag and stop timestamp (epoch ms)
+        self.round_stopped = False
+        self.round_stop_ms = None
 
     def read_pos(self, pos):
         parts = pos.split(",")
@@ -95,7 +110,16 @@ class Game:
         else:
             role = None
 
-        return (x, y, state, frame, equip_id, equip_frame, role)
+        # optional round_start (epoch ms) appended by server: used to sync timers
+        if len(parts) >= 8:
+            try:
+                round_start = int(parts[7])
+            except Exception:
+                round_start = None
+        else:
+            round_start = None
+
+        return (x, y, state, frame, equip_id, equip_frame, role, round_start)
     
     def make_pos(self, tup):
         # join any number of elements into comma-separated string
@@ -196,6 +220,9 @@ class Game:
                                 self.game_over = True
                                 self.game_over_start = pygame.time.get_ticks()
                                 self.winner_text = "Seeker wins!"
+                                # stop the round timer at this moment
+                                self.round_stopped = True
+                                self.round_stop_ms = int(time.time() * 1000)
                                 # continue to next iteration; payload sender will include CAUGHT
                                 continue
 
@@ -233,13 +260,22 @@ class Game:
             payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame)
             resp = self.network.send(self.make_pos(payload))
             if resp:
-                x, y, state, frame, equip_id, equip_frame, _role = self.read_pos(resp)
+                x, y, state, frame, equip_id, equip_frame, _role, round_start = self.read_pos(resp)
+                # update server-provided round start if present so timers stay synced
+                try:
+                    if round_start is not None:
+                        self.server_round_base = int(round_start)
+                        self.round_base = self.server_round_base
+                except Exception:
+                    pass
+
                 # apply remote state (position + animation)
                 try:
                     self.player2.set_remote_state((x, y), state, frame, equip_frame)
                 except Exception:
                     # fallback: set rect directly
                     self.player2.rect.center = (x, y)
+
                 # If remote reported CAUGHT, trigger game over overlay on this client as well
                 try:
                     if equip_id == 'CAUGHT':
@@ -247,6 +283,9 @@ class Game:
                             self.game_over = True
                             self.game_over_start = pygame.time.get_ticks()
                             self.winner_text = "Seeker wins!"
+                            # stop the round timer using server-synced time (now)
+                            self.round_stopped = True
+                            self.round_stop_ms = int(time.time() * 1000)
                     else:
                         # apply equip/unequip on remote player based on equip_id, only if remote is allowed to equip
                         if not getattr(self.player2, 'isSeeker', False):
@@ -262,13 +301,20 @@ class Game:
                 except Exception:
                     pass
 
-            # update round timer and movement permission
-            now = pygame.time.get_ticks()
-            timer_seconds = (now - self.round_base) / 1000.0 - 30.0
+            # update round timer and movement permission (use epoch ms from server)
+            now_ms = int(time.time() * 1000)
+            if self.round_base is None:
+                timer_seconds = None
+            else:
+                if getattr(self, 'round_stopped', False) and self.round_stop_ms is not None:
+                    timer_seconds = (self.round_stop_ms - self.round_base) / 1000.0
+                else:
+                    timer_seconds = (now_ms - self.round_base) / 1000.0
             # ensure player can_move only when not a seeker OR when timer > 0
             try:
                 if getattr(self.player, 'isSeeker', False):
-                    self.player.can_move = (timer_seconds > 0)
+                    # seeker cannot move until the round has a start time and timer > 0
+                    self.player.can_move = (timer_seconds is not None and timer_seconds > 0)
                 else:
                     self.player.can_move = True
             except Exception:
@@ -304,17 +350,17 @@ class Game:
 
             # render round timer at top-center with 50% opaque black background and thick white text
             try:
-                try:
+                # If timer_seconds is None, the server hasn't started the round yet
+                if timer_seconds is None:
+                    text = "Waiting for player..."
+                else:
                     ts = timer_seconds
-                except Exception:
-                    ts = (pygame.time.get_ticks() - self.round_base) / 1000.0 - 30.0
-
-                sign = '-' if ts < 0 else ''
-                secs = int(abs(ts))
-                mins = secs // 60
-                secs_rem = secs % 60
-                timer_text = f"{sign}{mins:02d}:{secs_rem:02d}"
-                text = f"{timer_text}"
+                    sign = '-' if ts < 0 else ''
+                    secs = int(abs(ts))
+                    mins = secs // 60
+                    secs_rem = secs % 60
+                    timer_text = f"{sign}{mins:02d}:{secs_rem:02d}"
+                    text = f"{timer_text}"
 
                 # render large text surface
                 txt_surf = self.large_font.render(text, True, (255, 255, 255))
@@ -328,6 +374,8 @@ class Game:
                 panel_surf.fill((0, 0, 0, 128))
 
                 # make thick text by blitting the text multiple times with slight offsets
+                text_surf = self.large_font.render(text, True, (255, 255, 255))
+                w, h = text_surf.get_size()
                 thick_surf = pygame.Surface((w + 4, h + 4), pygame.SRCALPHA)
                 offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]
                 for ox, oy in offsets:
