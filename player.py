@@ -12,7 +12,7 @@ class Player(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(center=pos)  # ✅ use get_rect (not get_frect for compatibility)
         
         # Create hitbox (smaller for better collision feel)
-        self.hitbox = self.rect.inflate(-60, 0)
+        self.hitbox = self.rect.inflate(-60, -60)
 
         # Movement setup
         self.direction = pygame.math.Vector2()
