@@ -952,19 +952,69 @@ class Game:
                     win_surf = self.font.render(self.winner_text, True, (255, 255, 255))
                     win_rect = win_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2))
                     self.display_surface.blit(win_surf, win_rect)
-                    # after 10 seconds, quit
+                    # after 10 seconds, return to menu
                     if self.game_over_start and pygame.time.get_ticks() - self.game_over_start >= 10000:
-                        pygame.quit()
-                        sys.exit()
+                        # End the current game and return to menu (caller will handle quitting)
+                        self.running = False
                 except Exception:
                     pass
             pygame.display.update()
             self.clock.tick(FPS)
 
-        pygame.quit()
+        # Close network socket (best-effort) so server isn't left with a stale connection
+        try:
+            if hasattr(self, 'network') and getattr(self.network, 'client', None):
+                try:
+                    self.network.client.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Return to caller (likely the menu) instead of quitting the whole process
+        return
 
 
 
 if __name__ == "__main__":
-    game = Game()
-    game.run()
+    # Show menu first; when Play is chosen create a Game and run it. After the
+    # Game.run() returns we return to the menu. Quit exits the loop and the app.
+    from menu import Menu, SettingsMenu
+    import importlib
+    import settings as settings_mod
+
+    menu = Menu()
+    while True:
+        choice = menu.run()
+        if choice == 'play':
+            # reload settings module so changes saved from menu are applied
+            try:
+                importlib.reload(settings_mod)
+                for name in dir(settings_mod):
+                    # update uppercase constants and common names
+                    if name.isupper() or name in ('server', 'port'):
+                        try:
+                            globals()[name] = getattr(settings_mod, name)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            game = Game()
+            game.run()
+        elif choice == 'settings':
+            # open settings editor. It will save to settings.py and reload the module.
+            sm = SettingsMenu(menu.display_surface, menu.clock, menu.font, menu.title_font)
+            res = sm.run()
+            if res == 'saved':
+                try:
+                    importlib.reload(settings_mod)
+                    for name in dir(settings_mod):
+                        if name.isupper() or name in ('server', 'port'):
+                            globals()[name] = getattr(settings_mod, name)
+                except Exception:
+                    pass
+        else:
+            break
+    # cleanup and exit
+    pygame.quit()
+    sys.exit()
