@@ -51,7 +51,9 @@ print("Waiting for a connection, Server Started")
 pos = [(1272, 2018, 'down', 0, 'None', 0), (1272, 2018, 'down', 0, 'None', 0)]
 
 def threaded_client(conn, player):
-    conn.send(str.encode(make_pos(pos[player])))
+    # send initial position plus role: first connected (player 0) is seeker
+    role = 'seeker' if player == 0 else 'hidder'
+    conn.send(str.encode(make_pos(pos[player]) + "," + role))
     reply = "" 
     while True:
         try:

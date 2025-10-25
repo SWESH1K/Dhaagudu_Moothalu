@@ -5,13 +5,21 @@ from os import walk
 
 
 class Player(pygame.sprite.Sprite):
-    def __init__(self, pos, groups, collision_sprites, controlled=True):
+    def __init__(self, pos, groups, collision_sprites, controlled=True, isSeeker=False):
         super().__init__(groups)
+        # Role flag: seeker cannot transform into objects
+        self.isSeeker = bool(isSeeker)
+
+        # determine which skin folder to use. Default: seekers use 'player2',
+        # hiders use 'player' unless explicitly overridden via isSeeker
+        self.skin_folder = 'player2' if self.isSeeker else 'player'
+
         self.load_images()
-        
+
         # Load image and set rect
         self.state, self.frame_index = 'down', 0
-        self.image = pygame.image.load(join("images", "player2", "down", "0.png")).convert_alpha()
+        # initial image uses chosen skin folder
+        self.image = pygame.image.load(join("images", self.skin_folder, "down", "0.png")).convert_alpha()
         self.rect = self.image.get_rect(center=pos)  # ✅ use get_rect (not get_frect for compatibility)
         
         # Create hitbox (smaller for better collision feel)
@@ -33,7 +41,8 @@ class Player(pygame.sprite.Sprite):
             'right': []
         }
         for state in self.frames.keys():
-            for folder_path, subfolder, filenames in walk(join("images", "player2", state)):
+            # walk through the chosen skin folder for this player
+            for folder_path, subfolder, filenames in walk(join("images", self.skin_folder, state)):
                 if filenames:
                     for filename in sorted(filenames, key=lambda x: int(x.split('.')[0])):
                         full_path = join(folder_path, filename)
@@ -164,6 +173,9 @@ class Player(pygame.sprite.Sprite):
         object's native size so the player appears the same size as the
         object.
         """
+        # Seekers are not allowed to transform/equip objects
+        if getattr(self, 'isSeeker', False):
+            return
         # If already equipped, unequip first
         if getattr(self, '_equipped', False):
             self.unequip()

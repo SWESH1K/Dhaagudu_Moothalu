@@ -11,6 +11,12 @@ from groups import AllSprites
 class Game:
     def __init__(self):
         pygame.init()
+        # Font for HUD
+        try:
+            pygame.font.init()
+        except Exception:
+            pass
+        self.font = pygame.font.SysFont('arial', 20)
         self.display_surface = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         pygame.display.set_caption("Dhaagudu Moothalu")
         self.clock = pygame.time.Clock()
@@ -20,15 +26,23 @@ class Game:
         # need the x,y center coordinates for Player creation.
         sp = self.read_pos(self.network.getPos())
         self.start_pos = (sp[0], sp[1])
+        # optional role returned by server: 'seeker' or 'hidder'
+        try:
+            self.role = sp[6]
+        except Exception:
+            self.role = None
 
 
         # Sprite Groups
         self.all_sprites = AllSprites()
         self.collision_sprites = pygame.sprite.Group()
 
-        self.player = Player(self.start_pos, self.all_sprites, self.collision_sprites)
+        # pass isSeeker to Player so each client knows their role and which skin to use
+        is_local_seeker = (self.role == 'seeker')
+        self.player = Player(self.start_pos, self.all_sprites, self.collision_sprites, controlled=True, isSeeker=is_local_seeker)
         # player2 is the remote player — don't let it read local keyboard input
-        self.player2 = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False)
+        # remote player's role is the opposite of local player's role
+        self.player2 = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
 
         self.setup()
 
@@ -61,7 +75,13 @@ class Game:
         else:
             equip_frame = 0
 
-        return (x, y, state, frame, equip_id, equip_frame)
+        # optional role (string) appended by server on initial connect: 'seeker' or 'hidder'
+        if len(parts) >= 7:
+            role = parts[6]
+        else:
+            role = None
+
+        return (x, y, state, frame, equip_id, equip_frame, role)
     
     def make_pos(self, tup):
         # join any number of elements into comma-separated string
@@ -124,6 +144,11 @@ class Game:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_x:
                         # interact: equip object in front or unequip
+                        # Seekers are not allowed to transform/equip objects
+                        if getattr(self.player, 'isSeeker', False):
+                            # ignore equip/unequip attempts for seekers
+                            continue
+
                         obj = self.player.get_object_in_front(self.collision_sprites)
                         if obj:
                             try:
@@ -153,7 +178,7 @@ class Game:
             payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame)
             resp = self.network.send(self.make_pos(payload))
             if resp:
-                x, y, state, frame, equip_id, equip_frame = self.read_pos(resp)
+                x, y, state, frame, equip_id, equip_frame, _role = self.read_pos(resp)
                 # apply remote state (position + animation)
                 try:
                     self.player2.set_remote_state((x, y), state, frame, equip_frame)
@@ -163,15 +188,17 @@ class Game:
 
                 # apply equip/unequip on remote player based on equip_id
                 try:
-                    if equip_id != 'None' and equip_id in self.object_map:
-                        obj_sprite = self.object_map[equip_id]
-                        self.player2.equip(obj_sprite.image)
-                        self.player2._equipped_id = equip_id
-                    else:
-                        # remote unequip
-                        self.player2.unequip()
-                        if hasattr(self.player2, '_equipped_id'):
-                            del self.player2._equipped_id
+                    # Only apply equip on remote if that remote is allowed to equip
+                    if not getattr(self.player2, 'isSeeker', False):
+                        if equip_id != 'None' and equip_id in self.object_map:
+                            obj_sprite = self.object_map[equip_id]
+                            self.player2.equip(obj_sprite.image)
+                            self.player2._equipped_id = equip_id
+                        else:
+                            # remote unequip
+                            self.player2.unequip()
+                            if hasattr(self.player2, '_equipped_id'):
+                                del self.player2._equipped_id
                 except Exception:
                     pass
 
@@ -181,6 +208,23 @@ class Game:
             # draw (render the world once, centered on the local player)
             self.display_surface.fill((30, 30, 30))
             self.all_sprites.draw(self.player.rect.center)
+            # HUD: show role and hint for hidders
+            try:
+                role_text = "Role: Seeker" if getattr(self.player, 'isSeeker', False) else "Role: Hidder"
+                role_surf = self.font.render(role_text, True, (255, 255, 255))
+                # draw semi-opaque background for readability
+                bg_rect = role_surf.get_rect(topleft=(8, 8)).inflate(8, 8)
+                s = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+                s.fill((0, 0, 0, 120))
+                self.display_surface.blit(s, bg_rect.topleft)
+                self.display_surface.blit(role_surf, (12, 12))
+
+                # hint for hidders
+                if not getattr(self.player, 'isSeeker', False):
+                    hint_surf = self.font.render("Press X to transform", True, (200, 200, 0))
+                    self.display_surface.blit(hint_surf, (12, 12 + role_surf.get_height() + 6))
+            except Exception:
+                pass
             pygame.display.update()
             self.clock.tick(FPS)
 
