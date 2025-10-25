@@ -253,6 +253,47 @@ class Game:
             # defensive: don't break the game loop on audio failures
             pass
 
+    def _play_whistle_normal(self):
+        """Play the whistle at full volume (no positional attenuation).
+        Also update debug HUD fields.
+        """
+        if not getattr(self, 'whistle_sound', None):
+            return
+        try:
+            ch = None
+            try:
+                ch = pygame.mixer.find_channel()
+            except Exception:
+                ch = None
+            if ch:
+                try:
+                    ch.set_volume(1.0, 1.0)
+                    ch.play(self.whistle_sound)
+                except Exception:
+                    try:
+                        self.whistle_sound.set_volume(1.0)
+                        self.whistle_sound.play()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self.whistle_sound.set_volume(1.0)
+                    self.whistle_sound.play()
+                except Exception:
+                    try:
+                        self.whistle_sound.play()
+                    except Exception:
+                        pass
+            # debug info
+            try:
+                self._last_whistle_volume = 1.0
+                self._last_whistle_pan = 0.0
+                self._last_whistle_time = pygame.time.get_ticks()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def run(self):
         while self.running:
 
@@ -378,9 +419,13 @@ class Game:
                             self.round_stopped = True
                             self.round_stop_ms = int(time.time() * 1000)
                     elif equip_id == 'WHISTLE':
-                        # remote player emitted a whistle — play it with positional audio using the remote's position
+                        # remote player emitted a whistle — seekers should hear it positionally,
+                        # while hidders hear the normal whistle sound.
                         try:
-                            self._play_whistle_at((x, y))
+                            if getattr(self.player, 'isSeeker', False):
+                                self._play_whistle_at((x, y))
+                            else:
+                                self._play_whistle_normal()
                         except Exception:
                             pass
                     else:
@@ -429,10 +474,9 @@ class Game:
                             self.player._whistle_emit = True
                         except Exception:
                             pass
-                        # play locally as source at local player's position
+                        # play locally: hidder should hear a normal (non-positional) whistle
                         try:
-                            src_pos = (int(self.player.hitbox.centerx), int(self.player.hitbox.centery))
-                            self._play_whistle_at(src_pos)
+                            self._play_whistle_normal()
                         except Exception:
                             pass
                         self._last_whistle_second = ts_sec
