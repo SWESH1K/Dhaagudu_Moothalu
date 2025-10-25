@@ -202,23 +202,29 @@ class Game:
             dist = math.hypot(dx, dy)
 
             # tuning constants
-            MAX_HEAR_DIST = 800.0  # beyond this the sound is inaudible
-            if dist >= MAX_HEAR_DIST:
+            MAX_HEAR_DIST = 2000.0  # increase audible radius so seeker hears distant whistles
+            if dist > MAX_HEAR_DIST:
+                # still store debug info with zero volume
+                try:
+                    self._last_whistle_volume = 0.0
+                    self._last_whistle_pan = 0.0
+                    self._last_whistle_time = pygame.time.get_ticks()
+                except Exception:
+                    pass
                 return
-            # linear distance attenuation (1.0..0.0)
+            # linear distance attenuation (1.0..0.0) with gentle falloff
             vol = max(0.0, 1.0 - (dist / MAX_HEAR_DIST))
 
-            # store debug info for HUD
+            # stereo panning based on horizontal offset; pan_norm in [-1..1]
+            pan_range = max(WINDOW_WIDTH / 2.0, 200.0)
+            pan_norm = max(-1.0, min(1.0, dx / pan_range))
+            # store debug info for HUD (after pan_norm computed)
             try:
                 self._last_whistle_volume = vol
                 self._last_whistle_pan = pan_norm
                 self._last_whistle_time = pygame.time.get_ticks()
             except Exception:
                 pass
-
-            # stereo panning based on horizontal offset; pan_norm in [-1..1]
-            pan_range = max(WINDOW_WIDTH / 2.0, 200.0)
-            pan_norm = max(-1.0, min(1.0, dx / pan_range))
             left = vol * (1.0 - pan_norm) / 2.0
             right = vol * (1.0 + pan_norm) / 2.0
 
