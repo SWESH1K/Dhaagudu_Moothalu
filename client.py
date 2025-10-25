@@ -5,6 +5,7 @@ from player import Player
 from sprites import *
 from pytmx.util_pygame import load_pygame
 from os.path import join
+from groups import AllSprites
 
 
 class Game:
@@ -17,13 +18,13 @@ class Game:
         self.running = True
 
         # Sprite Groups
-        self.all_sprites = pygame.sprite.Group()
+        self.all_sprites = AllSprites()
         self.collision_sprites = pygame.sprite.Group()
 
         self.setup()
 
         # Player
-        self.player = Player((500, 300), self.all_sprites, self.collision_sprites)
+        # self.player = Player((500, 300), self.all_sprites, self.collision_sprites)
 
     def setup(self):
         map = load_pygame(join("data", "maps", "world.tmx"))
@@ -46,6 +47,14 @@ class Game:
                             pygame.Surface((obj.width, obj.height)),
                             self.collision_sprites)
             
+        # Entities
+        for obj in map.get_layer_by_name("Entities"):
+            if obj.name == "Player":
+                self.player = Player((obj.x, obj.y),
+                                     self.all_sprites,
+                                     self.collision_sprites)
+            
+            
 
     def run(self):
         while self.running:
@@ -61,7 +70,7 @@ class Game:
 
             # draw
             self.display_surface.fill((30, 30, 30))
-            self.all_sprites.draw(self.display_surface)
+            self.all_sprites.draw(self.player.rect.center)
             pygame.display.update()
             self.clock.tick(FPS)
 
