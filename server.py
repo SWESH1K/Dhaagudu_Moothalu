@@ -24,7 +24,13 @@ def read_pos(data):
     else:
         state = 'down'
         frame = 0
-    return (x, y, state, frame)
+    # optional equip id
+    if len(parts) >= 5:
+        equip_id = parts[4]
+    else:
+        equip_id = 'None'
+
+    return (x, y, state, frame, equip_id)
 
 def make_pos(tup):
     # join any tuple elements into comma-separated string
@@ -33,7 +39,7 @@ def make_pos(tup):
 s.listen(2)
 print("Waiting for a connection, Server Started")
 
-pos = [(1272, 2018, 'down', 0), (1272, 2018, 'down', 0)]
+pos = [(1272, 2018, 'down', 0, 'None'), (1272, 2018, 'down', 0, 'None')]
 
 def threaded_client(conn, player):
     conn.send(str.encode(make_pos(pos[player])))

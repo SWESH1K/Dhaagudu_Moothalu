@@ -45,7 +45,14 @@ class Game:
         else:
             state = 'down'
             frame = 0
-        return (x, y, state, frame)
+
+        # optional equip id (string)
+        if len(parts) >= 5:
+            equip_id = parts[4]
+        else:
+            equip_id = 'None'
+
+        return (x, y, state, frame, equip_id)
     
     def make_pos(self, tup):
         # join any number of elements into comma-separated string
@@ -61,12 +68,18 @@ class Game:
                             self.all_sprites)
 
         # Trees / objects: mark these as interactive so player can pick them up
+        # Keep a map of objects by id so we can reference them when syncing equips
+        self.object_map = {}
         for obj in map.get_layer_by_name("Objects"):
             obj_sprite = CollisionSprite((obj.x, obj.y),
                                         obj.image,
                                         (self.all_sprites, self.collision_sprites))
             # mark as interactive (e.g., pickup-able)
             obj_sprite.interactive = True
+            # create an id for this object based on its map coordinates
+            obj_id = f"{int(obj.x)}_{int(obj.y)}"
+            obj_sprite.obj_id = obj_id
+            self.object_map[obj_id] = obj_sprite
             
         # Collision Tiles
         for obj in map.get_layer_by_name("Collisions"):
@@ -106,25 +119,50 @@ class Game:
                         if obj:
                             try:
                                 self.player.equip(obj.image)
+                                # record equipped object id to sync over network
+                                if hasattr(obj, 'obj_id'):
+                                    self.player._equipped_id = obj.obj_id
                             except Exception:
                                 pass
                         else:
                             self.player.unequip()
+                            if hasattr(self.player, '_equipped_id'):
+                                del self.player._equipped_id
 
             # Send the player's hitbox center + animation state/frame so the
             # remote client can show correct animation. We'll send a 4-part
             # payload: x,y,state,frame
             px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
-            payload = (px, py, self.player.state, int(self.player.frame_index))
+            # include equipped object id if any so remote clients can show the same
+            if getattr(self.player, '_equipped', False) and hasattr(self.player, '_equipped_id'):
+                equip_id = str(self.player._equipped_id)
+            else:
+                equip_id = 'None'
+
+            payload = (px, py, self.player.state, int(self.player.frame_index), equip_id)
             resp = self.network.send(self.make_pos(payload))
             if resp:
-                x, y, state, frame = self.read_pos(resp)
+                x, y, state, frame, equip_id = self.read_pos(resp)
                 # apply remote state (position + animation)
                 try:
                     self.player2.set_remote_state((x, y), state, frame)
                 except Exception:
                     # fallback: set rect directly
                     self.player2.rect.center = (x, y)
+
+                # apply equip/unequip on remote player based on equip_id
+                try:
+                    if equip_id != 'None' and equip_id in self.object_map:
+                        obj_sprite = self.object_map[equip_id]
+                        self.player2.equip(obj_sprite.image)
+                        self.player2._equipped_id = equip_id
+                    else:
+                        # remote unequip
+                        self.player2.unequip()
+                        if hasattr(self.player2, '_equipped_id'):
+                            del self.player2._equipped_id
+                except Exception:
+                    pass
 
             # update
             self.all_sprites.update(dt)
