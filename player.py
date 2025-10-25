@@ -34,6 +34,9 @@ class Player(pygame.sprite.Sprite):
         self.controlled = controlled
         # Whether this player is allowed to move (can be controlled externally by Game)
         self.can_move = True
+        # Whether this player is frozen (caught by seeker). Frozen players cannot move
+        # or transform and should display a freeze message on their client.
+        self._frozen = False
 
     def load_images(self):
         self.frames = {
@@ -157,7 +160,8 @@ class Player(pygame.sprite.Sprite):
     def update(self, dt):
         """Update player movement"""
         # Only process input/movement/animation for the locally controlled player.
-        if self.controlled and getattr(self, 'can_move', True):
+        # If frozen, the player cannot move or change animation.
+        if self.controlled and getattr(self, 'can_move', True) and not getattr(self, '_frozen', False):
             self.input()
             self.move(dt)
             self.animate(dt)

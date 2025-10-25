@@ -5,3 +5,8 @@ WINDOW_WIDTH = 1280
 WINDOW_HEIGHT = 720
 FPS = 60
 SPRITE_SIZE = 64
+# Number of players the server should accept/expect. First player (index 0)
+# will be the seeker, all other connected players will be hidders.
+# Change this to allow more players (client code may need updates to fully
+# support more than 2 players).
+NUM_PLAYERS = 3

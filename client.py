@@ -36,15 +36,137 @@ class Game:
         self.clock = pygame.time.Clock()
         self.network = Network(server, port)
         self.running = True
-        # read_pos now returns (x, y, state, frame, equip_id, equip_frame, role, round_start_ms).
-        # For initial spawn we only need the x,y center coordinates for Player creation.
-        sp = self.read_pos(self.network.getPos())
-        self.start_pos = (sp[0], sp[1])
-        # optional role returned by server: 'seeker' or 'hidder'
-        try:
-            self.role = sp[6]
-        except Exception:
-            self.role = None
+        # The server now sends all players' positions joined by '|' and appends
+        # metadata separated by '::'. The initial reply also includes this
+        # client's player index so we can map which entry is local.
+        initial_resp = self.network.getPos()
+        # parse initial response into positions list and metadata
+        def _parse_server_resp(resp):
+            # returns (positions_list, player_index_or_None, role_or_None, round_start_or_None, winner_index_or_None)
+            if resp is None:
+                return ([], None, None, None, None)
+            # metadata parts are separated by '::' and the server appends: [player_index]::[role]::[round_start]::[winner]
+            parts = resp.split('::')
+            # default values
+            player_index = None
+            role = None
+            round_start = None
+            winner = None
+            if len(parts) >= 4:
+                # winner is the last part
+                winner = parts[-1] if parts[-1] != 'None' else None
+                # round_start is second-last
+                try:
+                    round_start = int(parts[-2])
+                except Exception:
+                    round_start = None
+                # role is third-last
+                role = parts[-3] if parts[-3] != 'None' else None
+                # player_index may be fourth-last (initial reply)
+                if len(parts) >= 5:
+                    try:
+                        player_index = int(parts[-4])
+                        all_positions_str = '::'.join(parts[:-4])
+                    except Exception:
+                        player_index = None
+                        all_positions_str = '::'.join(parts[:-3])
+                else:
+                    all_positions_str = '::'.join(parts[:-3])
+            else:
+                # fallback: old single-position comma format
+                all_positions_str = resp
+
+            positions = []
+            try:
+                if all_positions_str:
+                    # each position encoded as comma-separated fields; multiple entries separated by '|'
+                    entries = all_positions_str.split('|')
+                    for e in entries:
+                        if not e:
+                            continue
+                        parts_c = e.split(',')
+                        try:
+                            x = int(parts_c[0]); y = int(parts_c[1])
+                        except Exception:
+                            continue
+                        state = parts_c[2] if len(parts_c) >= 3 else 'down'
+                        try:
+                            frame = int(parts_c[3]) if len(parts_c) >= 4 else 0
+                        except Exception:
+                            frame = 0
+                        equip_id = parts_c[4] if len(parts_c) >= 5 else 'None'
+                        try:
+                            equip_frame = int(parts_c[5]) if len(parts_c) >= 6 else 0
+                        except Exception:
+                            equip_frame = 0
+                        positions.append((x, y, state, frame, equip_id, equip_frame))
+            except Exception:
+                positions = []
+
+            return (positions, player_index, role, round_start, winner)
+
+        positions_list, my_index, role, round_start, winner = _parse_server_resp(initial_resp)
+        # store our player index for later incoming updates
+        self.my_index = my_index if my_index is not None else 0
+
+        # If server didn't send positions list, fall back to previous read_pos behavior
+        if positions_list:
+            # determine this client's start_pos using self.my_index if provided
+            if self.my_index is None:
+                self.my_index = 0
+            try:
+                sp = positions_list[self.my_index]
+                self.start_pos = (sp[0], sp[1])
+            except Exception:
+                # fallback to a sensible default if parsing failed
+                self.start_pos = (500, 300)
+            self.role = role
+            self.server_round_base = round_start
+            # If server declared a winner, apply it immediately
+            try:
+                if winner is not None:
+                    # winner is an index (int)
+                    try:
+                        widx = int(winner)
+                        # if winner is this client or someone else, set game_over and show text
+                        self.game_over = True
+                        self.game_over_start = pygame.time.get_ticks()
+                        if widx == self.my_index:
+                            self.winner_text = "You win!"
+                        else:
+                            # If winner is seeker (0) we show Seeker wins
+                            self.winner_text = "Seeker wins!"
+                        # stop the round timer at this moment
+                        self.round_stopped = True
+                        self.round_stop_ms = int(time.time() * 1000)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        else:
+            # fallback to old single-position reply format
+            try:
+                sp = self.read_pos(initial_resp)
+                self.start_pos = (sp[0], sp[1])
+                try:
+                    self.role = sp[6]
+                except Exception:
+                    self.role = None
+                try:
+                    if sp[7] is not None:
+                        try:
+                            self.server_round_base = int(sp[7])
+                        except Exception:
+                            self.server_round_base = None
+                    else:
+                        self.server_round_base = None
+                except Exception:
+                    self.server_round_base = None
+            except Exception:
+                # ultimate fallback
+                self.start_pos = (500, 300)
+                self.role = None
+                self.server_round_base = None
 
         # server-provided round start (epoch ms). If missing, keep as None so we can show waiting state
         try:
@@ -63,12 +185,33 @@ class Game:
         self.all_sprites = AllSprites()
         self.collision_sprites = pygame.sprite.Group()
 
-        # pass isSeeker to Player so each client knows their role and which skin to use
+        # Create local Player and remote Player instances for every other participant.
         is_local_seeker = (self.role == 'seeker')
         self.player = Player(self.start_pos, self.all_sprites, self.collision_sprites, controlled=True, isSeeker=is_local_seeker)
-        # player2 is the remote player — don't let it read local keyboard input
-        # remote player's role is the opposite of local player's role
-        self.player2 = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
+
+        # Build remote players mapping: index -> Player instance
+        self.remote_map = {}
+        try:
+            # If we parsed positions_list above and my_index exists, create remotes
+            if positions_list and my_index is not None:
+                for idx, p in enumerate(positions_list):
+                    if idx == my_index:
+                        continue
+                    px, py = p[0], p[1]
+                    is_seeker = (idx == 0)
+                    remote = Player((px, py), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
+                    self.remote_map[idx] = remote
+            else:
+                # Fallback: create a single remote player at an offset for older server behavior
+                remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
+                self.remote_map[1 if my_index in (0, None) else 0] = remote
+        except Exception:
+            # best-effort fallback
+            try:
+                remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
+                self.remote_map[1] = remote
+            except Exception:
+                pass
 
         self.setup()
         # Game over / caught state
@@ -314,6 +457,9 @@ class Game:
                         # If game already over, ignore
                         if self.game_over:
                             continue
+                        # If local player is frozen, they cannot interact
+                        if getattr(self.player, '_frozen', False):
+                            continue
 
                         # If player is seeker, attempt to catch the other player
                         if getattr(self.player, 'isSeeker', False):
@@ -336,24 +482,68 @@ class Game:
                                                     self.player.hitbox.centery - probe_h//2,
                                                     probe_w, probe_h)
 
-                            # check collision with remote player's hitbox or rect
+                            # check collisions against all remote players to find a hit target
                             try:
-                                other_hitbox = self.player2.hitbox
-                            except Exception:
-                                other_hitbox = self.player2.rect
+                                target_idx = None
+                                for idx, rp in getattr(self, 'remote_map', {}).items():
+                                    try:
+                                        other_hitbox = rp.hitbox
+                                    except Exception:
+                                        other_hitbox = rp.rect
+                                    if probe.colliderect(other_hitbox):
+                                        target_idx = idx
+                                        # mark remote frozen locally so seeker sees immediate effect
+                                        try:
+                                            rp._frozen = True
+                                            rp.can_move = False
+                                            try:
+                                                rp.unequip()
+                                            except Exception:
+                                                pass
+                                        except Exception:
+                                            pass
+                                        break
+                                if target_idx is not None:
+                                    # instruct server to broadcast the CAUGHT event targeted
+                                    # at the given index by setting our outgoing equip marker
+                                    try:
+                                        # mark remote frozen locally so seeker sees immediate effect
+                                        rp_local = self.remote_map.get(target_idx)
+                                        if rp_local is not None:
+                                            try:
+                                                rp_local._frozen = True
+                                                rp_local.can_move = False
+                                                try:
+                                                    rp_local.unequip()
+                                                except Exception:
+                                                    pass
+                                            except Exception:
+                                                pass
 
-                            if probe.colliderect(other_hitbox):
-                                # mark caught — will be sent in next payload and trigger overlay on both clients
-                                self.player._caught = True
-                                # show overlay locally
-                                self.game_over = True
-                                self.game_over_start = pygame.time.get_ticks()
-                                self.winner_text = "Seeker wins!"
-                                # stop the round timer at this moment
-                                self.round_stopped = True
-                                self.round_stop_ms = int(time.time() * 1000)
-                                # continue to next iteration; payload sender will include CAUGHT
-                                continue
+                                        self.player._caught = f"CAUGHT:{target_idx}"
+                                    except Exception:
+                                        pass
+
+                                    # Send the CAUGHT event immediately so the server/state updates
+                                    # and other clients learn about the freeze without waiting
+                                    # for the next frame payload (helps with multi-hider scenarios).
+                                    try:
+                                        px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
+                                        payload = (px, py, self.player.state, int(self.player.frame_index), str(self.player._caught), 0)
+                                        # send once immediately
+                                        _ = self.network.send(self.make_pos(payload))
+                                        # clear transient _caught after sending
+                                        try:
+                                            if hasattr(self.player, '_caught'):
+                                                del self.player._caught
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        pass
+
+                                    # Do not declare win locally here — server will broadcast the winner
+                            except Exception:
+                                pass
 
                         # Not a seeker or didn't catch: proceed with transform/unequip for hidders
                         obj = self.player.get_object_in_front(self.collision_sprites)
@@ -376,8 +566,12 @@ class Game:
             px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
             # include equipped object id if any so remote clients can show the same
             # priority: CAUGHT -> WHISTLE event -> equipped object -> None
-            if getattr(self.player, '_caught', False):
-                equip_id = 'CAUGHT'
+            if hasattr(self.player, '_caught') and self.player._caught:
+                # _caught may be a string like 'CAUGHT:<target_idx>' when targeting a specific player
+                try:
+                    equip_id = str(self.player._caught)
+                except Exception:
+                    equip_id = 'CAUGHT'
                 equip_frame = 0
             elif getattr(self.player, '_whistle_emit', False):
                 equip_id = 'WHISTLE'
@@ -397,8 +591,67 @@ class Game:
                     del self.player._whistle_emit
             except Exception:
                 pass
+            # clear transient CAUGHT marker so we don't repeatedly broadcast it
+            try:
+                if hasattr(self.player, '_caught'):
+                    del self.player._caught
+            except Exception:
+                pass
             if resp:
-                x, y, state, frame, equip_id, equip_frame, _role, round_start = self.read_pos(resp)
+                # Server now sends all players' positions joined by '|' and metadata separated by '::'.
+                # Parse accordingly and update every remote player we know about.
+                def _parse_resp(resp):
+                    # returns (positions_list, round_start_or_None, winner_or_None)
+                    if resp is None:
+                        return ([], None, None)
+                    parts = resp.split('::')
+                    # default
+                    round_start = None
+                    winner = None
+                    if len(parts) >= 3:
+                        # winner appended as last part
+                        winner = parts[-1] if parts[-1] != 'None' else None
+                        try:
+                            round_start = int(parts[-2])
+                        except Exception:
+                            round_start = None
+                        # all_positions may be everything before the trailing metadata
+                        if len(parts) >= 4:
+                            all_positions_str = '::'.join(parts[:-3])
+                        else:
+                            all_positions_str = '::'.join(parts[:-2])
+                    else:
+                        all_positions_str = resp
+
+                    positions = []
+                    try:
+                        if all_positions_str:
+                            entries = all_positions_str.split('|')
+                            for e in entries:
+                                if not e:
+                                    continue
+                                parts_c = e.split(',')
+                                try:
+                                    x = int(parts_c[0]); y = int(parts_c[1])
+                                except Exception:
+                                    continue
+                                state = parts_c[2] if len(parts_c) >= 3 else 'down'
+                                try:
+                                    frame = int(parts_c[3]) if len(parts_c) >= 4 else 0
+                                except Exception:
+                                    frame = 0
+                                equip_id = parts_c[4] if len(parts_c) >= 5 else 'None'
+                                try:
+                                    equip_frame = int(parts_c[5]) if len(parts_c) >= 6 else 0
+                                except Exception:
+                                    equip_frame = 0
+                                positions.append((x, y, state, frame, equip_id, equip_frame))
+                    except Exception:
+                        positions = []
+
+                    return (positions, round_start, winner)
+
+                positions_list, round_start, winner = _parse_resp(resp)
                 # update server-provided round start if present so timers stay synced
                 try:
                     if round_start is not None:
@@ -407,45 +660,119 @@ class Game:
                 except Exception:
                     pass
 
-                # apply remote state (position + animation)
+                # if server declared a winner, handle it (authoritative)
                 try:
-                    self.player2.set_remote_state((x, y), state, frame, equip_frame)
-                except Exception:
-                    # fallback: set rect directly
-                    self.player2.rect.center = (x, y)
-
-                # If remote reported CAUGHT or WHISTLE, handle special events; otherwise apply equip/unequip
-                try:
-                    if equip_id == 'CAUGHT':
-                        if not self.game_over:
-                            self.game_over = True
-                            self.game_over_start = pygame.time.get_ticks()
-                            self.winner_text = "Seeker wins!"
-                            # stop the round timer using server-synced time (now)
-                            self.round_stopped = True
-                            self.round_stop_ms = int(time.time() * 1000)
-                    elif equip_id == 'WHISTLE':
-                        # remote player emitted a whistle — seekers should hear it positionally,
-                        # while hidders hear the normal whistle sound.
+                    if winner is not None:
                         try:
-                            if getattr(self.player, 'isSeeker', False):
-                                self._play_whistle_at((x, y))
-                            else:
-                                self._play_whistle_normal()
+                            widx = int(winner)
+                            if not self.game_over:
+                                self.game_over = True
+                                self.game_over_start = pygame.time.get_ticks()
+                                if widx == self.my_index:
+                                    self.winner_text = "You win!"
+                                else:
+                                    # assume seeker wins otherwise
+                                    self.winner_text = "Seeker wins!"
+                                self.round_stopped = True
+                                self.round_stop_ms = int(time.time() * 1000)
                         except Exception:
                             pass
-                    else:
-                        # apply equip/unequip on remote player based on equip_id, only if remote is allowed to equip
-                        if not getattr(self.player2, 'isSeeker', False):
-                            if equip_id != 'None' and equip_id in self.object_map:
-                                obj_sprite = self.object_map[equip_id]
-                                self.player2.equip(obj_sprite.image)
-                                self.player2._equipped_id = equip_id
+                except Exception:
+                    pass
+
+                # Apply updates for every player entry we received
+                try:
+                    # keep track of frozen hidders for win-condition
+                    frozen_count = 0
+                    total_hidders = max(0, NUM_PLAYERS - 1)
+                    for idx, p in enumerate(positions_list):
+                        x, y, state, frame, equip_id, equip_frame = p
+                        # If this entry is the local player, update nothing (local authoritative)
+                        # else apply to corresponding remote player
+                        if hasattr(self, 'server_round_base') and self.server_round_base is None:
+                            pass
+                        # Update remote players
+                        if hasattr(self, 'remote_map') and idx in self.remote_map:
+                            rp = self.remote_map[idx]
+                            try:
+                                rp.set_remote_state((x, y), state, frame, equip_frame)
+                            except Exception:
+                                try:
+                                    rp.rect.center = (x, y)
+                                except Exception:
+                                    pass
+                        # Handle special equip events embedded per-player
+                        try:
+                            if isinstance(equip_id, str) and equip_id.startswith('CAUGHT:'):
+                                # format CAUGHT:<target_index>
+                                try:
+                                    target_idx = int(equip_id.split(':', 1)[1])
+                                except Exception:
+                                    target_idx = None
+                                if target_idx is not None:
+                                    # if target is local player, freeze ourselves
+                                    if target_idx == self.my_index:
+                                        if not getattr(self.player, 'isSeeker', False):
+                                            self.player._frozen = True
+                                            self.player.can_move = False
+                                            try:
+                                                self.player.unequip()
+                                            except Exception:
+                                                pass
+                                    else:
+                                        # freeze the targeted remote player
+                                        if hasattr(self, 'remote_map') and target_idx in self.remote_map:
+                                            try:
+                                                self.remote_map[target_idx]._frozen = True
+                                                self.remote_map[target_idx].can_move = False
+                                                try:
+                                                    self.remote_map[target_idx].unequip()
+                                                except Exception:
+                                                    pass
+                                            except Exception:
+                                                pass
+                            elif equip_id == 'WHISTLE':
+                                # someone emitted a whistle; if local is seeker, play positional
+                                try:
+                                    if getattr(self.player, 'isSeeker', False):
+                                        self._play_whistle_at((x, y))
+                                    else:
+                                        self._play_whistle_normal()
+                                except Exception:
+                                    pass
                             else:
-                                # remote unequip
-                                self.player2.unequip()
-                                if hasattr(self.player2, '_equipped_id'):
-                                    del self.player2._equipped_id
+                                # apply equip/unequip for remote players if appropriate
+                                if hasattr(self, 'remote_map') and idx in self.remote_map:
+                                    rp = self.remote_map[idx]
+                                    if not getattr(rp, 'isSeeker', False):
+                                        if equip_id != 'None' and equip_id in self.object_map:
+                                            obj_sprite = self.object_map[equip_id]
+                                            rp.equip(obj_sprite.image)
+                                            rp._equipped_id = equip_id
+                                        else:
+                                            rp.unequip()
+                                            if hasattr(rp, '_equipped_id'):
+                                                del rp._equipped_id
+                        except Exception:
+                            pass
+
+                    # After processing all entries, if this client is a seeker check win
+                    try:
+                        if getattr(self.player, 'isSeeker', False):
+                            frozen_known = 0
+                            for idx, rp in (getattr(self, 'remote_map', {})).items():
+                                if not getattr(rp, 'isSeeker', False) and getattr(rp, '_frozen', False):
+                                    frozen_known += 1
+                            # include local hidders if any (unlikely when seeker)
+                            if frozen_known >= total_hidders:
+                                if not self.game_over:
+                                    self.game_over = True
+                                    self.game_over_start = pygame.time.get_ticks()
+                                    self.winner_text = "Seeker wins!"
+                                    self.round_stopped = True
+                                    self.round_stop_ms = int(time.time() * 1000)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -513,6 +840,21 @@ class Game:
                     hint_surf = self.font.render("Press X to transform", True, (200, 200, 0))
                     self.display_surface.blit(hint_surf, (12, hint_y))
                     hint_y += hint_surf.get_height() + 6
+
+                # show seeker progress: number of hidders caught out of total
+                try:
+                    if getattr(self.player, 'isSeeker', False):
+                        frozen_known = 0
+                        total_hidders = max(0, NUM_PLAYERS - 1)
+                        for idx, rp in (getattr(self, 'remote_map', {})).items():
+                            if not getattr(rp, 'isSeeker', False) and getattr(rp, '_frozen', False):
+                                frozen_known += 1
+                        caught_text = f"Caught: {frozen_known}/{total_hidders}"
+                        caught_surf = self.font.render(caught_text, True, (200, 200, 0))
+                        self.display_surface.blit(caught_surf, (12, hint_y))
+                        hint_y += caught_surf.get_height() + 6
+                except Exception:
+                    pass
 
                 # (timer is rendered separately at the top-center)
             except Exception:
@@ -587,6 +929,19 @@ class Game:
                     pass
             except Exception:
                 pass
+
+            # If local player is frozen (caught), render a freeze overlay
+            if getattr(self.player, '_frozen', False) and not self.game_over:
+                try:
+                    overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+                    overlay.fill((0, 0, 0, 120))
+                    self.display_surface.blit(overlay, (0, 0))
+                    # show a clearer caught message to the hidder
+                    freeze_surf = self.large_font.render("You are caught", True, (255, 255, 255))
+                    freeze_rect = freeze_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2))
+                    self.display_surface.blit(freeze_surf, freeze_rect)
+                except Exception:
+                    pass
 
             # If game over, render overlay and exit after 10 seconds
             if self.game_over:
