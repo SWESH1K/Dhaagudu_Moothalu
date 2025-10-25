@@ -1,6 +1,7 @@
 import pygame
 import sys
 import time
+import math
 from network import Network
 from settings import *
 from player import Player
@@ -13,6 +14,11 @@ from groups import AllSprites
 class Game:
     def __init__(self):
         pygame.init()
+        # initialize audio mixer (best-effort)
+        try:
+            pygame.mixer.init()
+        except Exception:
+            pass
         # Font for HUD
         try:
             pygame.font.init()
@@ -74,6 +80,17 @@ class Game:
         # round stopped flag and stop timestamp (epoch ms)
         self.round_stopped = False
         self.round_stop_ms = None
+        # load whistle sound for hidders (best-effort)
+        try:
+            self.whistle_sound = pygame.mixer.Sound(join("sounds", "whistle.wav"))
+        except Exception:
+            self.whistle_sound = None
+        # remember last second when we played the whistle so we only play once per interval
+        self._last_whistle_second = None
+        # debug: last whistle proximity info (volume 0.0-1.0, pan -1..1, timestamp ms)
+        self._last_whistle_volume = None
+        self._last_whistle_pan = 0.0
+        self._last_whistle_time = 0
 
     def read_pos(self, pos):
         parts = pos.split(",")
@@ -170,6 +187,71 @@ class Game:
                 # # self.player2 = Player((self.other_player_pos.x + 100, self.other_player_pos.y),
                 # #                      self.all_sprites,
                 # #                      self.collision_sprites)
+    def _play_whistle_at(self, source_pos):
+        """Play the loaded whistle sound as if originating from source_pos (x,y).
+        Volume and stereo panning are computed based on listener (local player) position.
+        """
+        if not getattr(self, 'whistle_sound', None):
+            return
+        try:
+            listener_x = int(self.player.hitbox.centerx)
+            listener_y = int(self.player.hitbox.centery)
+            sx, sy = int(source_pos[0]), int(source_pos[1])
+            dx = sx - listener_x
+            dy = sy - listener_y
+            dist = math.hypot(dx, dy)
+
+            # tuning constants
+            MAX_HEAR_DIST = 800.0  # beyond this the sound is inaudible
+            if dist >= MAX_HEAR_DIST:
+                return
+            # linear distance attenuation (1.0..0.0)
+            vol = max(0.0, 1.0 - (dist / MAX_HEAR_DIST))
+
+            # store debug info for HUD
+            try:
+                self._last_whistle_volume = vol
+                self._last_whistle_pan = pan_norm
+                self._last_whistle_time = pygame.time.get_ticks()
+            except Exception:
+                pass
+
+            # stereo panning based on horizontal offset; pan_norm in [-1..1]
+            pan_range = max(WINDOW_WIDTH / 2.0, 200.0)
+            pan_norm = max(-1.0, min(1.0, dx / pan_range))
+            left = vol * (1.0 - pan_norm) / 2.0
+            right = vol * (1.0 + pan_norm) / 2.0
+
+            # attempt to grab a free channel so we can set per-channel stereo volumes
+            ch = None
+            try:
+                ch = pygame.mixer.find_channel()
+            except Exception:
+                ch = None
+
+            if ch:
+                try:
+                    ch.set_volume(left, right)
+                    ch.play(self.whistle_sound)
+                except Exception:
+                    # fallback
+                    try:
+                        self.whistle_sound.set_volume(vol)
+                        self.whistle_sound.play()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self.whistle_sound.set_volume(vol)
+                    self.whistle_sound.play()
+                except Exception:
+                    try:
+                        self.whistle_sound.play()
+                    except Exception:
+                        pass
+        except Exception:
+            # defensive: don't break the game loop on audio failures
+            pass
 
     def run(self):
         while self.running:
@@ -246,9 +328,12 @@ class Game:
             # payload: x,y,state,frame
             px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
             # include equipped object id if any so remote clients can show the same
-            # If the player has been marked as caught (seeker caught hidder), send a special CAUGHT tag
+            # priority: CAUGHT -> WHISTLE event -> equipped object -> None
             if getattr(self.player, '_caught', False):
                 equip_id = 'CAUGHT'
+                equip_frame = 0
+            elif getattr(self.player, '_whistle_emit', False):
+                equip_id = 'WHISTLE'
                 equip_frame = 0
             elif getattr(self.player, '_equipped', False) and hasattr(self.player, '_equipped_id'):
                 equip_id = str(self.player._equipped_id)
@@ -259,6 +344,12 @@ class Game:
 
             payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame)
             resp = self.network.send(self.make_pos(payload))
+            # clear transient whistle emit so it is only broadcast once
+            try:
+                if hasattr(self.player, '_whistle_emit'):
+                    del self.player._whistle_emit
+            except Exception:
+                pass
             if resp:
                 x, y, state, frame, equip_id, equip_frame, _role, round_start = self.read_pos(resp)
                 # update server-provided round start if present so timers stay synced
@@ -276,7 +367,7 @@ class Game:
                     # fallback: set rect directly
                     self.player2.rect.center = (x, y)
 
-                # If remote reported CAUGHT, trigger game over overlay on this client as well
+                # If remote reported CAUGHT or WHISTLE, handle special events; otherwise apply equip/unequip
                 try:
                     if equip_id == 'CAUGHT':
                         if not self.game_over:
@@ -286,6 +377,12 @@ class Game:
                             # stop the round timer using server-synced time (now)
                             self.round_stopped = True
                             self.round_stop_ms = int(time.time() * 1000)
+                    elif equip_id == 'WHISTLE':
+                        # remote player emitted a whistle — play it with positional audio using the remote's position
+                        try:
+                            self._play_whistle_at((x, y))
+                        except Exception:
+                            pass
                     else:
                         # apply equip/unequip on remote player based on equip_id, only if remote is allowed to equip
                         if not getattr(self.player2, 'isSeeker', False):
@@ -317,6 +414,29 @@ class Game:
                     self.player.can_move = (timer_seconds is not None and timer_seconds > 0)
                 else:
                     self.player.can_move = True
+            except Exception:
+                pass
+
+            # Play whistle for hidders every 25 seconds while the timer is positive.
+            # Broadcast a WHISTLE event (sent via the regular payload) so other clients
+            # can play the whistle with positional audio. Also play locally.
+            try:
+                if (not getattr(self.player, 'isSeeker', False)) and timer_seconds is not None and timer_seconds > 0 and self.whistle_sound:
+                    ts_sec = int(timer_seconds)
+                    if ts_sec % 25 == 0 and ts_sec != self._last_whistle_second:
+                        # mark for network broadcast (next outgoing payload will carry WHISTLE)
+                        try:
+                            self.player._whistle_emit = True
+                        except Exception:
+                            pass
+                        # play locally as source at local player's position
+                        try:
+                            src_pos = (int(self.player.hitbox.centerx), int(self.player.hitbox.centery))
+                            self._play_whistle_at(src_pos)
+                        except Exception:
+                            pass
+                        self._last_whistle_second = ts_sec
+                    # If we're at a non-multiple second, we don't change _last_whistle_second
             except Exception:
                 pass
 
@@ -388,6 +508,33 @@ class Game:
                 x = (WINDOW_WIDTH - panel_w) // 2
                 y = 8
                 self.display_surface.blit(panel_surf, (x, y))
+
+                # Debug: if a whistle was recently played, show proximity volume in bottom-left
+                try:
+                    now_ms = pygame.time.get_ticks()
+                    if getattr(self, '_last_whistle_time', 0) and now_ms - self._last_whistle_time <= 3000 and self._last_whistle_volume is not None:
+                        vol = max(0.0, min(1.0, float(self._last_whistle_volume)))
+                        pan = getattr(self, '_last_whistle_pan', 0.0)
+                        percent = int(vol * 100)
+                        txt = f"Whistle vol: {percent}%"
+                        txt_surf2 = self.font.render(txt, True, (255, 255, 255))
+                        padding = 6
+                        bg_rect = txt_surf2.get_rect(bottomleft=(12, WINDOW_HEIGHT - 12)).inflate(padding * 2, padding * 2)
+                        s2 = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
+                        s2.fill((0, 0, 0, 160))
+                        self.display_surface.blit(s2, bg_rect.topleft)
+                        self.display_surface.blit(txt_surf2, (bg_rect.left + padding, bg_rect.top + padding))
+                        # draw a small volume bar below the text
+                        bar_w = 120
+                        bar_h = 10
+                        bar_x = bg_rect.left + padding
+                        bar_y = bg_rect.top + padding + txt_surf2.get_height() + 6
+                        # border
+                        pygame.draw.rect(self.display_surface, (200, 200, 200), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2), 1)
+                        fill_w = int(vol * bar_w)
+                        pygame.draw.rect(self.display_surface, (100, 220, 100), (bar_x, bar_y, fill_w, bar_h))
+                except Exception:
+                    pass
             except Exception:
                 pass
 
