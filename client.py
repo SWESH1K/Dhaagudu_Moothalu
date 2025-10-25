@@ -60,11 +60,13 @@ class Game:
                             image,
                             self.all_sprites)
 
-        # Trees
+        # Trees / objects: mark these as interactive so player can pick them up
         for obj in map.get_layer_by_name("Objects"):
-            CollisionSprite((obj.x, obj.y),
-                            obj.image,
-                            (self.all_sprites, self.collision_sprites))
+            obj_sprite = CollisionSprite((obj.x, obj.y),
+                                        obj.image,
+                                        (self.all_sprites, self.collision_sprites))
+            # mark as interactive (e.g., pickup-able)
+            obj_sprite.interactive = True
             
         # Collision Tiles
         for obj in map.get_layer_by_name("Collisions"):
@@ -97,6 +99,17 @@ class Game:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_x:
+                        # interact: equip object in front or unequip
+                        obj = self.player.get_object_in_front(self.collision_sprites)
+                        if obj:
+                            try:
+                                self.player.equip(obj.image)
+                            except Exception:
+                                pass
+                        else:
+                            self.player.unequip()
 
             # Send the player's hitbox center + animation state/frame so the
             # remote client can show correct animation. We'll send a 4-part

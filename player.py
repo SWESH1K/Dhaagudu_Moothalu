@@ -36,9 +36,9 @@ class Player(pygame.sprite.Sprite):
             for folder_path, subfolder, filenames in walk(join("images", "player", state)):
                 if filenames:
                     for filename in sorted(filenames, key=lambda x: int(x.split('.')[0])):
-                            full_path = join(folder_path, filename)
-                            surf = pygame.image.load(full_path).convert_alpha()
-                            self.frames[state].append(surf)
+                        full_path = join(folder_path, filename)
+                        surf = pygame.image.load(full_path).convert_alpha()
+                        self.frames[state].append(surf)
 
     def input(self):
         """Handle player input"""
@@ -51,6 +51,38 @@ class Player(pygame.sprite.Sprite):
         # Normalize vector only if moving
         if self.direction.magnitude() > 0:
             self.direction = self.direction.normalize()
+
+    def get_object_in_front(self, collision_sprites, distance=16):
+        """Return the first interactive sprite in front of the player within distance.
+
+        Uses the player's current facing (`self.state`) to test a small rect in
+        front of the hitbox.
+        """
+        # Build a small probe rect in front of the player based on facing
+        probe_w, probe_h = 16, 16
+        if self.state == 'up':
+            probe = pygame.Rect(self.hitbox.centerx - probe_w//2,
+                                self.hitbox.top - distance - probe_h,
+                                probe_w, probe_h)
+        elif self.state == 'down':
+            probe = pygame.Rect(self.hitbox.centerx - probe_w//2,
+                                self.hitbox.bottom + distance,
+                                probe_w, probe_h)
+        elif self.state == 'left':
+            probe = pygame.Rect(self.hitbox.left - distance - probe_w,
+                                self.hitbox.centery - probe_h//2,
+                                probe_w, probe_h)
+        else:  # right
+            probe = pygame.Rect(self.hitbox.right + distance,
+                                self.hitbox.centery - probe_h//2,
+                                probe_w, probe_h)
+
+        for sprite in collision_sprites:
+            # only consider sprites explicitly marked interactive
+            if getattr(sprite, 'interactive', False):
+                if probe.colliderect(sprite.rect):
+                    return sprite
+        return None
 
     def move(self, dt):
         """Move player using delta time"""
@@ -94,7 +126,20 @@ class Player(pygame.sprite.Sprite):
         else:
             self.frame_index = 0  # freeze on first frame when idle
 
-        self.image = self.frames[self.state][int(self.frame_index) % len(self.frames[self.state])]
+        # If equipped with an object, show that image instead of player's
+        # Choose which image to display. If the player is equipped with an
+        # object, use the object's surface at its native size and adjust rect
+        # / hitbox when equipping (handled in equip()). Otherwise use the
+        # animated player frame.
+        base_frame = self.frames[self.state][int(self.frame_index) % len(self.frames[self.state])]
+        if getattr(self, '_equipped', False) and getattr(self, 'equipped_surface', None):
+            # equipped image is set during equip(); keep it and ensure center
+            try:
+                self.rect.center = self.hitbox.center
+            except Exception:
+                pass
+        else:
+            self.image = base_frame
 
         
 
@@ -113,6 +158,88 @@ class Player(pygame.sprite.Sprite):
             except Exception:
                 # Fall back to rect center if hitbox not set
                 pass
+
+    def equip(self, surface):
+        """Equip an object: change the player's visible skin and hitbox to the
+        object's native size so the player appears the same size as the
+        object.
+        """
+        # If already equipped, unequip first
+        if getattr(self, '_equipped', False):
+            self.unequip()
+
+        # Save current rect/hitbox/image/speed to restore on unequip
+        self._saved_rect = self.rect.copy()
+        self._saved_hitbox = self.hitbox.copy()
+        self._saved_image = self.image
+        self._saved_speed = self.speed
+
+        # Assign equipped surface and update rect/hitbox to object's size
+        self.equipped_surface = surface
+        self._equipped = True
+
+        try:
+            # Use object's native size; center it on the player's previous center
+            self.image = self.equipped_surface
+            self.rect = self.image.get_rect(center=self._saved_rect.center)
+            # make hitbox a bit smaller than the visual rect
+            pad_w = max(2, int(self.rect.width * 0.2))
+            pad_h = max(2, int(self.rect.height * 0.2))
+            self.hitbox = self.rect.inflate(-pad_w, -pad_h)
+        except Exception:
+            # fallback: don't change size if something goes wrong
+            self.rect = self._saved_rect.copy()
+            self.hitbox = self._saved_hitbox.copy()
+
+        # Reduce player's movement speed to 75% of original while equipped
+        try:
+            self.speed = float(self._saved_speed) * 0.75
+        except Exception:
+            # if speed not numeric for some reason, keep it unchanged
+            pass
+
+    def unequip(self):
+        """Remove equipped object and revert to normal player skin."""
+        if getattr(self, '_equipped', False):
+            # preserve current center so we don't teleport back to equip spot
+            try:
+                current_center = self.rect.center
+            except Exception:
+                current_center = None
+
+            # restore saved visuals but keep current position
+            try:
+                self.rect = self._saved_rect.copy()
+                if current_center:
+                    self.rect.center = current_center
+
+                self.hitbox = self._saved_hitbox.copy()
+                if current_center:
+                    self.hitbox.center = current_center
+
+                self.image = self._saved_image
+            except Exception:
+                pass
+
+            # clear equipped flags
+            if hasattr(self, 'equipped_surface'):
+                del self.equipped_surface
+            if hasattr(self, '_saved_rect'):
+                del self._saved_rect
+            if hasattr(self, '_saved_hitbox'):
+                del self._saved_hitbox
+
+            # restore speed if we saved it
+            try:
+                if hasattr(self, '_saved_speed'):
+                    self.speed = self._saved_speed
+                    del self._saved_speed
+            except Exception:
+                pass
+
+            if hasattr(self, '_saved_image'):
+                del self._saved_image
+            self._equipped = False
 
     def set_remote_state(self, pos, state, frame_index):
         """Apply remote player's position and animation state.
