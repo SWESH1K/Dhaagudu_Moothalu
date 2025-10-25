@@ -1,6 +1,9 @@
 import pygame
 import sys
-from settings import WINDOW_WIDTH, WINDOW_HEIGHT
+from settings import WINDOW_WIDTH, WINDOW_HEIGHT, SPRITE_SIZE
+from pytmx.util_pygame import load_pygame
+from os.path import join
+import pygame as _pygame
 import re
 import shutil
 import importlib
@@ -31,6 +34,31 @@ class Menu:
 
         self.clock = pygame.time.Clock()
 
+        # prepare blurred map background
+        try:
+            self._prepare_background()
+        except Exception:
+            self.bg_surface = None
+
+        # pre-render an attractive, bold title surface (outline + shadow)
+        try:
+            self.title_surf = self._create_title_surface("Dhaagudu Moothalu")
+            # scale the title surface to be 50% of window width while preserving aspect
+            try:
+                target_w = int(WINDOW_WIDTH * 0.5)
+                tw = self.title_surf.get_width()
+                th = self.title_surf.get_height()
+                if tw > 0 and tw != target_w:
+                    scale_factor = target_w / float(tw)
+                    new_h = max(1, int(th * scale_factor))
+                    self.title_surf = pygame.transform.smoothscale(self.title_surf, (target_w, new_h))
+            except Exception:
+                pass
+            self.title_rect = self.title_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//4))
+        except Exception:
+            self.title_surf = None
+            self.title_rect = None
+
         # button geometry
         self.button_w = 240
         self.button_h = 64
@@ -50,6 +78,128 @@ class Menu:
         txt = self.font.render(text, True, (255, 255, 255))
         tr = txt.get_rect(center=rect.center)
         self.display_surface.blit(txt, tr)
+
+    def _create_title_surface(self, text: str):
+        # Create a blocky, pixel-art title reminiscent of a voxel/block game style.
+        # We render the text at a small resolution, then draw each 'on' pixel as
+        # a filled block on a larger surface to achieve a chunky, Minecraft-like look
+        # without copying any trademarked artwork.
+        #
+        # Steps:
+        # 1. Render text to a small temporary surface using a monospace font.
+        # 2. For each pixel that is non-transparent, draw a block (rect) on the
+        #    final surface scaled by `scale`.
+        # 3. Draw an outline by expanding the blocks and a drop shadow.
+
+        # small render size and scale factor
+        # choose a slightly larger scale for a bolder block look
+        scale = 5
+        small_font_size = max(18, int(self.title_font.get_linesize() * 0.45))
+        try:
+            small_font = pygame.font.SysFont('couriernew', small_font_size)
+        except Exception:
+            small_font = pygame.font.SysFont(None, small_font_size)
+
+        small = small_font.render(text, True, (255, 255, 255))
+        sw, sh = small.get_size()
+        pad_blocks = 2
+
+        tw = (sw + pad_blocks*2) * scale
+        th = (sh + pad_blocks*2) * scale
+        surf = pygame.Surface((tw, th), pygame.SRCALPHA)
+
+        # draw drop shadow blocks (offset by a few pixels)
+        shadow_color = (10, 10, 10, 200)
+        shadow_offset = (int(scale*0.5), int(scale*0.5))
+
+        # read small surface pixels
+        small_locked = small.copy().convert_alpha()
+        for y in range(sh):
+            for x in range(sw):
+                col = small_locked.get_at((x, y))
+                if col.a > 16:
+                    # draw shadow block
+                    rx = (x + pad_blocks) * scale + shadow_offset[0]
+                    ry = (y + pad_blocks) * scale + shadow_offset[1]
+                    pygame.draw.rect(surf, shadow_color, (rx, ry, scale, scale))
+
+        # outline color (dark)
+        outline_color = (8, 8, 8)
+        # main block color: pure white (user requested)
+        main_block_color = (255, 255, 255)
+
+        # draw main blocks with outline per-block to get chunky look
+        # enlarge main blocks slightly and make outline a bit larger so there
+        # are no inner gaps (removes inner squares)
+        for y in range(sh):
+            for x in range(sw):
+                col = small_locked.get_at((x, y))
+                if col.a > 16:
+                    rx = (x + pad_blocks) * scale
+                    ry = (y + pad_blocks) * scale
+                    # outline by drawing a larger dark rect behind
+                    pygame.draw.rect(surf, outline_color, (rx-2, ry-2, scale+4, scale+4))
+                    # draw main white block slightly bigger to avoid gaps
+                    pygame.draw.rect(surf, main_block_color, (rx-1, ry-1, scale+2, scale+2))
+
+        return surf
+
+    def _prepare_background(self):
+        # Load tiled map and render a window-sized view centered on the map,
+        # then create a blurred version by downscaling and upscaling.
+        try:
+            tmx = load_pygame(join('data', 'maps', 'world.tmx'))
+        except Exception:
+            self.bg_surface = None
+            return
+
+        map_w = tmx.width * SPRITE_SIZE
+        map_h = tmx.height * SPRITE_SIZE
+
+        # Render map into a window-sized surface centered on map center
+        surf = _pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT)).convert_alpha()
+        surf.fill((0, 0, 0, 0))
+
+        # center of map in pixels
+        center_x = map_w // 2
+        center_y = map_h // 2
+        offset_x = -(center_x - (WINDOW_WIDTH // 2))
+        offset_y = -(center_y - (WINDOW_HEIGHT // 2))
+
+        # draw ground layer if present
+        try:
+            layer = tmx.get_layer_by_name('Ground')
+            for x, y, image in layer.tiles():
+                if image:
+                    px = x * SPRITE_SIZE + offset_x
+                    py = y * SPRITE_SIZE + offset_y
+                    surf.blit(image, (px, py))
+        except Exception:
+            pass
+
+        # draw objects layer (non-ground)
+        try:
+            layer = tmx.get_layer_by_name('Objects')
+            for obj in layer:
+                if getattr(obj, 'image', None):
+                    px = int(obj.x) + offset_x
+                    py = int(obj.y) + offset_y
+                    surf.blit(obj.image, (px, py))
+        except Exception:
+            pass
+
+        # create blurred version: downscale then upscale
+        try:
+            scale = 6  # larger = stronger blur
+            small = _pygame.transform.smoothscale(surf, (max(1, WINDOW_WIDTH//scale), max(1, WINDOW_HEIGHT//scale)))
+            blur = _pygame.transform.smoothscale(small, (WINDOW_WIDTH, WINDOW_HEIGHT))
+            # darken a bit for menu readability
+            dark = _pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), _pygame.SRCALPHA)
+            dark.fill((10, 10, 20, 120))
+            blur.blit(dark, (0, 0))
+            self.bg_surface = blur
+        except Exception:
+            self.bg_surface = surf
 
     def run(self):
         # returns 'play' or 'quit'
@@ -72,12 +222,26 @@ class Menu:
                     if self.quit_rect.collidepoint(mx, my):
                         return 'quit'
 
-            self.display_surface.fill((20, 20, 30))
+            # draw blurred map background if available
+            if getattr(self, 'bg_surface', None):
+                try:
+                    self.display_surface.blit(self.bg_surface, (0, 0))
+                except Exception:
+                    self.display_surface.fill((20, 20, 30))
+            else:
+                self.display_surface.fill((20, 20, 30))
 
             # Title
-            title_surf = self.title_font.render("Dhaagudu Moothalu", True, (240, 240, 240))
-            title_rect = title_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//4))
-            self.display_surface.blit(title_surf, title_rect)
+            # Title (use pre-rendered attractive surface if available)
+            if getattr(self, 'title_surf', None):
+                try:
+                    self.display_surface.blit(self.title_surf, self.title_rect)
+                except Exception:
+                    pass
+            else:
+                title_surf = self.title_font.render("Dhaagudu Moothalu", True, (240, 240, 240))
+                title_rect = title_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//4))
+                self.display_surface.blit(title_surf, title_rect)
 
             # Buttons
             mx, my = pygame.mouse.get_pos()
