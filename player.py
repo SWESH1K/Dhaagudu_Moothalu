@@ -241,7 +241,7 @@ class Player(pygame.sprite.Sprite):
                 del self._saved_image
             self._equipped = False
 
-    def set_remote_state(self, pos, state, frame_index):
+    def set_remote_state(self, pos, state, frame_index, equip_frame=0):
         """Apply remote player's position and animation state.
 
         pos: (x, y) tuple (center coordinates)
@@ -264,8 +264,17 @@ class Player(pygame.sprite.Sprite):
         except Exception:
             fi = 0
 
+        # If the remote player is equipped and an equip_frame was provided,
+        # prefer that as the index for the equipped-asset animation.
+        use_frame = fi
+        try:
+            ef = int(equip_frame)
+            use_frame = ef if ef is not None else fi
+        except Exception:
+            pass
+
         # Clamp frame index and set image immediately so remote animation is visible
         frames_list = self.frames.get(self.state)
         if frames_list:
-            self.frame_index = fi % len(frames_list)
+            self.frame_index = use_frame % len(frames_list)
             self.image = frames_list[int(self.frame_index) % len(frames_list)]

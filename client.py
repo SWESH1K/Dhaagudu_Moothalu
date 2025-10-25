@@ -52,7 +52,16 @@ class Game:
         else:
             equip_id = 'None'
 
-        return (x, y, state, frame, equip_id)
+        # optional equip_frame (int)
+        if len(parts) >= 6:
+            try:
+                equip_frame = int(parts[5])
+            except Exception:
+                equip_frame = 0
+        else:
+            equip_frame = 0
+
+        return (x, y, state, frame, equip_id, equip_frame)
     
     def make_pos(self, tup):
         # join any number of elements into comma-separated string
@@ -136,16 +145,18 @@ class Game:
             # include equipped object id if any so remote clients can show the same
             if getattr(self.player, '_equipped', False) and hasattr(self.player, '_equipped_id'):
                 equip_id = str(self.player._equipped_id)
+                equip_frame = int(self.player.frame_index)
             else:
                 equip_id = 'None'
+                equip_frame = 0
 
-            payload = (px, py, self.player.state, int(self.player.frame_index), equip_id)
+            payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame)
             resp = self.network.send(self.make_pos(payload))
             if resp:
-                x, y, state, frame, equip_id = self.read_pos(resp)
+                x, y, state, frame, equip_id, equip_frame = self.read_pos(resp)
                 # apply remote state (position + animation)
                 try:
-                    self.player2.set_remote_state((x, y), state, frame)
+                    self.player2.set_remote_state((x, y), state, frame, equip_frame)
                 except Exception:
                     # fallback: set rect directly
                     self.player2.rect.center = (x, y)
