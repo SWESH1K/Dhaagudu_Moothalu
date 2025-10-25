@@ -1,4 +1,5 @@
 import pygame
+import sys
 from network import Network
 from settings import *
 from player import Player
@@ -16,7 +17,13 @@ class Game:
             pygame.font.init()
         except Exception:
             pass
-        self.font = pygame.font.SysFont('arial', 20)
+        # Font for HUD (retro monospace)
+        try:
+            self.font = pygame.font.SysFont('couriernew', 18)
+            self.large_font = pygame.font.SysFont('couriernew', 36)
+        except Exception:
+            self.font = pygame.font.SysFont(None, 20)
+            self.large_font = pygame.font.SysFont(None, 36)
         self.display_surface = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         pygame.display.set_caption("Dhaagudu Moothalu")
         self.clock = pygame.time.Clock()
@@ -45,6 +52,13 @@ class Game:
         self.player2 = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
 
         self.setup()
+        # Game over / caught state
+        self.game_over = False
+        self.game_over_start = None
+        self.winner_text = ""
+        # Round timer: start now but display from -30 seconds so hider gets 30s to hide
+        # timer_seconds = (now - self.round_base)/1000 - 30
+        self.round_base = pygame.time.get_ticks()
 
     def read_pos(self, pos):
         parts = pos.split(",")
@@ -144,11 +158,48 @@ class Game:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_x:
                         # interact: equip object in front or unequip
-                        # Seekers are not allowed to transform/equip objects
-                        if getattr(self.player, 'isSeeker', False):
-                            # ignore equip/unequip attempts for seekers
+                        # If game already over, ignore
+                        if self.game_over:
                             continue
 
+                        # If player is seeker, attempt to catch the other player
+                        if getattr(self.player, 'isSeeker', False):
+                            # build a small probe rect in front of seeker (similar to get_object_in_front)
+                            probe_w, probe_h = 24, 24
+                            if self.player.state == 'up':
+                                probe = pygame.Rect(self.player.hitbox.centerx - probe_w//2,
+                                                    self.player.hitbox.top - 16 - probe_h,
+                                                    probe_w, probe_h)
+                            elif self.player.state == 'down':
+                                probe = pygame.Rect(self.player.hitbox.centerx - probe_w//2,
+                                                    self.player.hitbox.bottom + 16,
+                                                    probe_w, probe_h)
+                            elif self.player.state == 'left':
+                                probe = pygame.Rect(self.player.hitbox.left - 16 - probe_w,
+                                                    self.player.hitbox.centery - probe_h//2,
+                                                    probe_w, probe_h)
+                            else:  # right
+                                probe = pygame.Rect(self.player.hitbox.right + 16,
+                                                    self.player.hitbox.centery - probe_h//2,
+                                                    probe_w, probe_h)
+
+                            # check collision with remote player's hitbox or rect
+                            try:
+                                other_hitbox = self.player2.hitbox
+                            except Exception:
+                                other_hitbox = self.player2.rect
+
+                            if probe.colliderect(other_hitbox):
+                                # mark caught — will be sent in next payload and trigger overlay on both clients
+                                self.player._caught = True
+                                # show overlay locally
+                                self.game_over = True
+                                self.game_over_start = pygame.time.get_ticks()
+                                self.winner_text = "Seeker wins!"
+                                # continue to next iteration; payload sender will include CAUGHT
+                                continue
+
+                        # Not a seeker or didn't catch: proceed with transform/unequip for hidders
                         obj = self.player.get_object_in_front(self.collision_sprites)
                         if obj:
                             try:
@@ -168,7 +219,11 @@ class Game:
             # payload: x,y,state,frame
             px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
             # include equipped object id if any so remote clients can show the same
-            if getattr(self.player, '_equipped', False) and hasattr(self.player, '_equipped_id'):
+            # If the player has been marked as caught (seeker caught hidder), send a special CAUGHT tag
+            if getattr(self.player, '_caught', False):
+                equip_id = 'CAUGHT'
+                equip_frame = 0
+            elif getattr(self.player, '_equipped', False) and hasattr(self.player, '_equipped_id'):
                 equip_id = str(self.player._equipped_id)
                 equip_frame = int(self.player.frame_index)
             else:
@@ -185,22 +240,39 @@ class Game:
                 except Exception:
                     # fallback: set rect directly
                     self.player2.rect.center = (x, y)
-
-                # apply equip/unequip on remote player based on equip_id
+                # If remote reported CAUGHT, trigger game over overlay on this client as well
                 try:
-                    # Only apply equip on remote if that remote is allowed to equip
-                    if not getattr(self.player2, 'isSeeker', False):
-                        if equip_id != 'None' and equip_id in self.object_map:
-                            obj_sprite = self.object_map[equip_id]
-                            self.player2.equip(obj_sprite.image)
-                            self.player2._equipped_id = equip_id
-                        else:
-                            # remote unequip
-                            self.player2.unequip()
-                            if hasattr(self.player2, '_equipped_id'):
-                                del self.player2._equipped_id
+                    if equip_id == 'CAUGHT':
+                        if not self.game_over:
+                            self.game_over = True
+                            self.game_over_start = pygame.time.get_ticks()
+                            self.winner_text = "Seeker wins!"
+                    else:
+                        # apply equip/unequip on remote player based on equip_id, only if remote is allowed to equip
+                        if not getattr(self.player2, 'isSeeker', False):
+                            if equip_id != 'None' and equip_id in self.object_map:
+                                obj_sprite = self.object_map[equip_id]
+                                self.player2.equip(obj_sprite.image)
+                                self.player2._equipped_id = equip_id
+                            else:
+                                # remote unequip
+                                self.player2.unequip()
+                                if hasattr(self.player2, '_equipped_id'):
+                                    del self.player2._equipped_id
                 except Exception:
                     pass
+
+            # update round timer and movement permission
+            now = pygame.time.get_ticks()
+            timer_seconds = (now - self.round_base) / 1000.0 - 30.0
+            # ensure player can_move only when not a seeker OR when timer > 0
+            try:
+                if getattr(self.player, 'isSeeker', False):
+                    self.player.can_move = (timer_seconds > 0)
+                else:
+                    self.player.can_move = True
+            except Exception:
+                pass
 
             # update
             self.all_sprites.update(dt)
@@ -220,11 +292,72 @@ class Game:
                 self.display_surface.blit(role_surf, (12, 12))
 
                 # hint for hidders
+                hint_y = 12 + role_surf.get_height() + 6
                 if not getattr(self.player, 'isSeeker', False):
                     hint_surf = self.font.render("Press X to transform", True, (200, 200, 0))
-                    self.display_surface.blit(hint_surf, (12, 12 + role_surf.get_height() + 6))
+                    self.display_surface.blit(hint_surf, (12, hint_y))
+                    hint_y += hint_surf.get_height() + 6
+
+                # (timer is rendered separately at the top-center)
             except Exception:
                 pass
+
+            # render round timer at top-center with 50% opaque black background and thick white text
+            try:
+                try:
+                    ts = timer_seconds
+                except Exception:
+                    ts = (pygame.time.get_ticks() - self.round_base) / 1000.0 - 30.0
+
+                sign = '-' if ts < 0 else ''
+                secs = int(abs(ts))
+                mins = secs // 60
+                secs_rem = secs % 60
+                timer_text = f"{sign}{mins:02d}:{secs_rem:02d}"
+                text = f"{timer_text}"
+
+                # render large text surface
+                txt_surf = self.large_font.render(text, True, (255, 255, 255))
+                w, h = txt_surf.get_size()
+                padding_x, padding_y = 16, 8
+
+                panel_w = w + padding_x * 2
+                panel_h = h + padding_y * 2
+                panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+                # 50% opacity black background
+                panel_surf.fill((0, 0, 0, 128))
+
+                # make thick text by blitting the text multiple times with slight offsets
+                thick_surf = pygame.Surface((w + 4, h + 4), pygame.SRCALPHA)
+                offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]
+                for ox, oy in offsets:
+                    thick_surf.blit(self.large_font.render(text, True, (255, 255, 255)), (ox + 2, oy + 2))
+
+                # center thick_surf inside panel
+                panel_surf.blit(thick_surf, (padding_x - 2, padding_y - 2))
+
+                # blit panel at top center
+                x = (WINDOW_WIDTH - panel_w) // 2
+                y = 8
+                self.display_surface.blit(panel_surf, (x, y))
+            except Exception:
+                pass
+
+            # If game over, render overlay and exit after 10 seconds
+            if self.game_over:
+                try:
+                    overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+                    overlay.fill((0, 0, 0, 160))
+                    self.display_surface.blit(overlay, (0, 0))
+                    win_surf = self.font.render(self.winner_text, True, (255, 255, 255))
+                    win_rect = win_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2))
+                    self.display_surface.blit(win_surf, win_rect)
+                    # after 10 seconds, quit
+                    if self.game_over_start and pygame.time.get_ticks() - self.game_over_start >= 10000:
+                        pygame.quit()
+                        sys.exit()
+                except Exception:
+                    pass
             pygame.display.update()
             self.clock.tick(FPS)
 

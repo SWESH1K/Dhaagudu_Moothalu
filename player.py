@@ -32,6 +32,8 @@ class Player(pygame.sprite.Sprite):
         # Whether this player is controlled locally (reads keyboard). Remote players
         # should be created with controlled=False so they don't respond to local input.
         self.controlled = controlled
+        # Whether this player is allowed to move (can be controlled externally by Game)
+        self.can_move = True
 
     def load_images(self):
         self.frames = {
@@ -155,7 +157,7 @@ class Player(pygame.sprite.Sprite):
     def update(self, dt):
         """Update player movement"""
         # Only process input/movement/animation for the locally controlled player.
-        if self.controlled:
+        if self.controlled and getattr(self, 'can_move', True):
             self.input()
             self.move(dt)
             self.animate(dt)
