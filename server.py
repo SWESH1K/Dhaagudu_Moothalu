@@ -1,6 +1,7 @@
 import socket
 from _thread import *
 import sys
+import os
 import time
 from settings import *
 
@@ -55,6 +56,12 @@ ROUND_START_MS = None
 
 # authoritative winner index when round ends (None when ongoing)
 WINNER_INDEX = None
+
+# flag used to prevent scheduling multiple restarts for same round
+RESTART_SCHEDULED = False
+
+# map of connection -> role string so we can broadcast role-aware payloads
+connections_info = {}
 
 default_pos = (1272, 2018, 'down', 0, 'None', 0)
 # create a list of default positions sized to NUM_PLAYERS. Each entry will be
@@ -155,6 +162,72 @@ def threaded_client(conn, player):
     print("Lost connection")
     conn.close()
 
+
+def round_watcher():
+    """Background watcher: when WINNER_INDEX becomes non-None, schedule a restart.
+    This resets frozen/player positions and sets a new ROUND_START_MS, then
+    broadcasts the updated authoritative state to all connected clients.
+    """
+    global WINNER_INDEX, ROUND_START_MS, frozen, pos, RESTART_SCHEDULED
+    while True:
+        try:
+            if WINNER_INDEX is not None and not RESTART_SCHEDULED:
+                RESTART_SCHEDULED = True
+                print("Round ended (winner:", WINNER_INDEX, ") — scheduling restart in 5s")
+                # short delay so clients can display end state to players
+                time.sleep(5)
+
+                # Perform a full process restart: close connections and listening socket
+                print("Performing full process restart now...")
+                try:
+                    # close all client connections
+                    for c in list(connections):
+                        try:
+                            c.close()
+                        except Exception:
+                            pass
+                except NameError:
+                    # no connections list yet
+                    pass
+
+                # close listening socket
+                try:
+                    s.close()
+                except Exception:
+                    pass
+
+                # execv to replace the current process with a fresh Python process
+                try:
+                    python = sys.executable
+                    args = [python] + sys.argv
+                    print(f"Re-execing: {args}")
+                    os.execv(python, args)
+                except Exception as e:
+                    # If exec fails, log and attempt to continue (fallback to in-memory reset)
+                    print("Full restart failed:", e)
+                    try:
+                        WINNER_INDEX = None
+                        ROUND_START_MS = int(time.time() * 1000) + 30000
+                        frozen = [False for _ in range(NUM_PLAYERS)]
+                        pos = [default_pos for _ in range(NUM_PLAYERS)]
+                    except Exception:
+                        pass
+                    RESTART_SCHEDULED = False
+        except Exception:
+            # keep watcher alive despite any unexpected errors
+            try:
+                time.sleep(1)
+            except Exception:
+                pass
+        # small sleep to avoid busy loop
+        time.sleep(0.2)
+
+    # start background watcher to automatically restart rounds after win
+    try:
+        start_new_thread(round_watcher, ())
+    except Exception:
+        pass
+
 currentPlayer = 0
 while True:
     conn, addr = s.accept()
@@ -164,6 +237,12 @@ while True:
         connections.append(conn)
     except NameError:
         connections = [conn]
+    # record this connection's role for later role-aware broadcasts
+    try:
+        role_for_conn = 'seeker' if currentPlayer == 0 else 'hidder'
+        connections_info[conn] = role_for_conn
+    except Exception:
+        pass
     # If we've now reached the configured number of players, start the round.
     # Note: currentPlayer is 0-based; when it equals NUM_PLAYERS - 1 the most
     # recent connection filled the expected slots.

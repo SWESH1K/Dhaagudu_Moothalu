@@ -360,7 +360,9 @@ class Game:
 
             # stereo panning based on horizontal offset; pan_norm in [-1..1]
             pan_range = max(WINDOW_WIDTH / 2.0, 200.0)
-            pan_norm = max(-1.0, min(1.0, dx / pan_range))
+            # invert horizontal offset when computing pan so game X -> audio L/R match
+            # (previously used dx/pan_range which produced inverted left/right on some setups)
+            pan_norm = max(-1.0, min(1.0, -dx / pan_range))
             # store debug info for HUD (after pan_norm computed)
             try:
                 self._last_whistle_volume = vol
