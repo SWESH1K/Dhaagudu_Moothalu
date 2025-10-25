@@ -2,6 +2,8 @@ import pygame
 from network import Network
 from settings import *
 from player import Player
+from sprites import *
+from random import randint
 
 pygame.init()
 
@@ -17,9 +19,15 @@ class Game:
 
         # Sprite Groups
         self.all_sprites = pygame.sprite.Group()
+        self.collision_sprites = pygame.sprite.Group()
 
         # Player
-        self.player = Player((100, 100), self.all_sprites)
+        self.player = Player((100, 100), self.all_sprites, self.collision_sprites)
+
+        for i in range(6):
+            x = randint(0, WINDOW_WIDTH)
+            y = randint(0, WINDOW_HEIGHT)
+            CollisionSprite((x, y), (SPRITE_SIZE, SPRITE_SIZE), (self.all_sprites, self.collision_sprites))
 
     def run(self):
         while self.running:
