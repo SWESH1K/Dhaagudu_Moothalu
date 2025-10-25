@@ -11,7 +11,7 @@ class Player(pygame.sprite.Sprite):
         
         # Load image and set rect
         self.state, self.frame_index = 'down', 0
-        self.image = pygame.image.load(join("images", "player", "down", "0.png")).convert_alpha()
+        self.image = pygame.image.load(join("images", "player2", "down", "0.png")).convert_alpha()
         self.rect = self.image.get_rect(center=pos)  # ✅ use get_rect (not get_frect for compatibility)
         
         # Create hitbox (smaller for better collision feel)
@@ -33,7 +33,7 @@ class Player(pygame.sprite.Sprite):
             'right': []
         }
         for state in self.frames.keys():
-            for folder_path, subfolder, filenames in walk(join("images", "player", state)):
+            for folder_path, subfolder, filenames in walk(join("images", "player2", state)):
                 if filenames:
                     for filename in sorted(filenames, key=lambda x: int(x.split('.')[0])):
                         full_path = join(folder_path, filename)
