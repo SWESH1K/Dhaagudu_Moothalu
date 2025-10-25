@@ -1,13 +1,16 @@
 from settings import *
 import pygame
 from os.path import join
+from os import walk
 
 
 class Player(pygame.sprite.Sprite):
     def __init__(self, pos, groups, collision_sprites):
         super().__init__(groups)
+        self.load_images()
         
         # Load image and set rect
+        self.state, self.frame_index = 'down', 0
         self.image = pygame.image.load(join("images", "player", "down", "0.png")).convert_alpha()
         self.rect = self.image.get_rect(center=pos)  # ✅ use get_rect (not get_frect for compatibility)
         
@@ -18,6 +21,21 @@ class Player(pygame.sprite.Sprite):
         self.direction = pygame.math.Vector2()
         self.speed = 500
         self.collision_sprites = collision_sprites
+
+    def load_images(self):
+        self.frames = {
+            'up': [],
+            'down': [],
+            'left': [],
+            'right': []
+        }
+        for state in self.frames.keys():
+            for folder_path, subfolder, filenames in walk(join("images", "player", state)):
+                if filenames:
+                    for filename in sorted(filenames, key=lambda x: int(x.split('.')[0])):
+                            full_path = join(folder_path, filename)
+                            surf = pygame.image.load(full_path).convert_alpha()
+                            self.frames[state].append(surf)
 
     def input(self):
         """Handle player input"""
@@ -59,7 +77,26 @@ class Player(pygame.sprite.Sprite):
                     elif self.direction.y < 0:  # moving up
                         self.hitbox.top = sprite.rect.bottom
 
+    def animate(self, dt):
+        if self.direction.x != 0:
+            self.state = 'right' if self.direction.x > 0 else 'left'
+        elif self.direction.y != 0:
+            self.state = 'down' if self.direction.y > 0 else 'up'
+
+        # Animate only when moving
+        if self.direction.magnitude() > 0:
+            self.frame_index += 5 * dt  # animation speed
+            if self.frame_index >= len(self.frames[self.state]):
+                self.frame_index = 0  # loop animation
+        else:
+            self.frame_index = 0  # freeze on first frame when idle
+            
+        self.image = self.frames[self.state][int(self.frame_index) % len(self.frames[self.state])]
+
+        
+
     def update(self, dt):
         """Update player movement"""
         self.input()
         self.move(dt)
+        self.animate(dt)
