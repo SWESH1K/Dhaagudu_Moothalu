@@ -1500,7 +1500,16 @@ if __name__ == "__main__":
                         host_cmd = [sys.executable, '--run-server', '--auto-ip', '--port', str(chosen_port), '--num-players', str(chosen_players)]
                     else:
                         host_cmd = [sys.executable, os.path.join(cwd, 'server.py'), '--auto-ip', '--port', str(chosen_port), '--num-players', str(chosen_players)]
-                    host_proc = subprocess.Popen(host_cmd, cwd=cwd)
+                    # On Windows, suppress creating a new console window for the child process
+                    try:
+                        if os.name == 'nt':
+                            CREATE_NO_WINDOW = 0x08000000
+                            host_proc = subprocess.Popen(host_cmd, cwd=cwd, creationflags=CREATE_NO_WINDOW)
+                        else:
+                            host_proc = subprocess.Popen(host_cmd, cwd=cwd)
+                    except TypeError:
+                        # fallback if creationflags unsupported for some reason
+                        host_proc = subprocess.Popen(host_cmd, cwd=cwd)
                     # give server a moment to bind sockets
                     time.sleep(0.5)
                     try:

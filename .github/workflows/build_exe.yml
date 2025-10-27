@@ -35,7 +35,7 @@ jobs:
           if (Test-Path data)   { $addDataArgs += '--add-data "data;data"' }
           if (Test-Path images) { $addDataArgs += '--add-data "images;images"' }
           if (Test-Path sounds) { $addDataArgs += '--add-data "sounds;sounds"' }
-          $baseArgs = "--noconfirm --onefile --name DhaaguduMoothalu --hidden-import server"
+          $baseArgs = "--noconfirm --onefile --windowed --name DhaaguduMoothalu --hidden-import server"
           $cmd = "pyinstaller $baseArgs $($addDataArgs -join ' ') client.py"
           Write-Host "Running: $cmd"
           Invoke-Expression $cmd
