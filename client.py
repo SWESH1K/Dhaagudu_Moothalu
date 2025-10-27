@@ -8,7 +8,8 @@ from settings import *
 from player import Player
 from sprites import *
 from pytmx.util_pygame import load_pygame
-from os.path import join
+import os
+from util.resource_path import resource_path
 from groups import AllSprites
 import subprocess
 import os
@@ -286,7 +287,7 @@ class Game:
         self.round_stop_ms = None
         # load whistle sound for hidders (best-effort)
         try:
-            self.whistle_sound = pygame.mixer.Sound(join("sounds", "whistle.wav"))
+            self.whistle_sound = pygame.mixer.Sound(resource_path(os.path.join("sounds", "whistle.wav")))
         except Exception:
             self.whistle_sound = None
         # remember last second when we played the whistle so we only play once per interval
@@ -297,7 +298,7 @@ class Game:
         self._last_whistle_time = 0
         # background ambience: looped beach sound
         try:
-            bg_path = join("sounds", "beach_background.mp3")
+            bg_path = resource_path(os.path.join("sounds", "beach_background.mp3"))
             # use music module for long, looped background audio
             try:
                 pygame.mixer.music.load(bg_path)
@@ -369,7 +370,7 @@ class Game:
         return ",".join(map(str, tup))
 
     def setup(self):
-        map = load_pygame(join("data", "maps", "world.tmx"))
+    map = load_pygame(resource_path(os.path.join("data", "maps", "world.tmx")))
 
         # Ground
         for x, y, image in map.get_layer_by_name("Ground").tiles():

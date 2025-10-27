@@ -1,7 +1,8 @@
 from settings import *
 import pygame
-from os.path import join
+import os
 from os import walk
+from util.resource_path import resource_path
 
 
 class Player(pygame.sprite.Sprite):
@@ -25,7 +26,7 @@ class Player(pygame.sprite.Sprite):
         # Load image and set rect
         self.state, self.frame_index = 'down', 0
         # initial image uses chosen skin folder
-        self.image = pygame.image.load(join("images", self.skin_folder, "down", "0.png")).convert_alpha()
+        self.image = pygame.image.load(resource_path(os.path.join("images", self.skin_folder, "down", "0.png"))).convert_alpha()
         self.rect = self.image.get_rect(center=pos)  # ✅ use get_rect (not get_frect for compatibility)
         
         # Create hitbox (smaller for better collision feel)
@@ -45,14 +46,14 @@ class Player(pygame.sprite.Sprite):
         self._frozen = False
         # walking sound (loop while moving) - best-effort load
         try:
-            self._walk_sound = pygame.mixer.Sound(join("sounds", "walking_sound.mp3"))
+            self._walk_sound = pygame.mixer.Sound(resource_path(os.path.join("sounds", "walking_sound.mp3")))
         except Exception:
             self._walk_sound = None
         # channel used to play walking sound (if any)
         self._walk_channel = None
         # shape shift sound (play once on equip/unequip)
         try:
-            self._shape_shift_sound = pygame.mixer.Sound(join("sounds", "shape_shift.mp3"))
+            self._shape_shift_sound = pygame.mixer.Sound(resource_path(os.path.join("sounds", "shape_shift.mp3")))
         except Exception:
             self._shape_shift_sound = None
 
@@ -65,10 +66,10 @@ class Player(pygame.sprite.Sprite):
         }
         for state in self.frames.keys():
             # walk through the chosen skin folder for this player
-            for folder_path, subfolder, filenames in walk(join("images", self.skin_folder, state)):
+            for folder_path, subfolder, filenames in walk(resource_path(os.path.join("images", self.skin_folder, state))):
                 if filenames:
                     for filename in sorted(filenames, key=lambda x: int(x.split('.')[0])):
-                        full_path = join(folder_path, filename)
+                        full_path = os.path.join(folder_path, filename)
                         surf = pygame.image.load(full_path).convert_alpha()
                         self.frames[state].append(surf)
 
