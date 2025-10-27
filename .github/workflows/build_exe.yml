@@ -32,9 +32,9 @@ jobs:
         run: |
           # Add data folders if they exist; PyInstaller on Windows expects SRC;DEST
           $addDataArgs = @()
-          if (Test-Path data)   { $addDataArgs += "--add-data \"data;data\"" }
-          if (Test-Path images) { $addDataArgs += "--add-data \"images;images\"" }
-          if (Test-Path sounds) { $addDataArgs += "--add-data \"sounds;sounds\"" }
+          if (Test-Path data)   { $addDataArgs += '--add-data "data;data"' }
+          if (Test-Path images) { $addDataArgs += '--add-data "images;images"' }
+          if (Test-Path sounds) { $addDataArgs += '--add-data "sounds;sounds"' }
           $baseArgs = "--noconfirm --onefile --name DhaaguduMoothalu"
           $cmd = "pyinstaller $baseArgs $($addDataArgs -join ' ') client.py"
           Write-Host "Running: $cmd"
