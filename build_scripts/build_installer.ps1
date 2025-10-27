@@ -59,7 +59,7 @@ foreach ($d in @('data','images','sounds')) {
     }
 }
 
-$pyArgs = @("--noconfirm", "--onefile", "--name", $AppName)
+$pyArgs = @("--noconfirm", "--onefile", "--name", $AppName, "--hidden-import", "server")
 if (-not $Console) { $pyArgs += "--windowed" }
 $pyArgs += $addData
 $pyArgs += $Entry
