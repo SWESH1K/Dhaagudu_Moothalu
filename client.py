@@ -10,6 +10,17 @@ from sprites import *
 from pytmx.util_pygame import load_pygame
 import os
 from util.resource_path import resource_path
+import sys as _sys_for_server
+
+# When the frozen executable is invoked with --run-server, run the bundled server
+# code in this process. This allows the client to spawn a server subprocess that
+# uses the same bundled exe (works for PyInstaller one-file builds).
+if '--run-server' in _sys_for_server.argv:
+    try:
+        import server  # server.py runs its server loop on import
+    except Exception as _e:
+        print('Failed to start embedded server:', _e)
+    _sys_for_server.exit(0)
 from groups import AllSprites
 import subprocess
 import os
@@ -370,7 +381,7 @@ class Game:
         return ",".join(map(str, tup))
 
     def setup(self):
-    map = load_pygame(resource_path(os.path.join("data", "maps", "world.tmx")))
+        map = load_pygame(resource_path(os.path.join("data", "maps", "world.tmx")))
 
         # Ground
         for x, y, image in map.get_layer_by_name("Ground").tiles():
@@ -1482,8 +1493,14 @@ if __name__ == "__main__":
                 # start server in background and connect to localhost using chosen port/players
                 try:
                     cwd = os.path.dirname(__file__)
-                    # Use same Python executable to avoid PATH issues
-                    host_proc = subprocess.Popen([sys.executable, os.path.join(cwd, 'server.py'), '--auto-ip', '--port', str(chosen_port), '--num-players', str(chosen_players)], cwd=cwd)
+                    # Use same Python executable to avoid PATH issues. If running as a
+                    # bundled exe (PyInstaller onefile), spawn the same exe with a
+                    # special flag so it starts the embedded server code.
+                    if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
+                        host_cmd = [sys.executable, '--run-server', '--auto-ip', '--port', str(chosen_port), '--num-players', str(chosen_players)]
+                    else:
+                        host_cmd = [sys.executable, os.path.join(cwd, 'server.py'), '--auto-ip', '--port', str(chosen_port), '--num-players', str(chosen_players)]
+                    host_proc = subprocess.Popen(host_cmd, cwd=cwd)
                     # give server a moment to bind sockets
                     time.sleep(0.5)
                     try:
