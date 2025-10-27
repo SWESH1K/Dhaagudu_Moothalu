@@ -9,6 +9,9 @@ from sprites import *
 from pytmx.util_pygame import load_pygame
 from os.path import join
 from groups import AllSprites
+import subprocess
+import os
+import sys
 
 
 class Game:
@@ -1007,9 +1010,71 @@ if __name__ == "__main__":
     import settings as settings_mod
 
     menu = Menu()
+    # track server subprocess started by this client (if any) so we can terminate it
+    host_proc = None
     while True:
         choice = menu.run()
         if choice == 'play':
+            # Offer Host / Join selection before starting a game
+            def _pick_host_or_join(menu):
+                disp = menu.display_surface
+                clock = menu.clock
+                font = menu.font
+                w, h = 320, 64
+                host_rect = pygame.Rect((WINDOW_WIDTH - w)//2, (WINDOW_HEIGHT//2) - h - 12, w, h)
+                join_rect = pygame.Rect((WINDOW_WIDTH - w)//2, (WINDOW_HEIGHT//2) + 12, w, h)
+                back_rect = menu.quit_rect
+                while True:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            return 'back'
+                        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                            mx, my = pygame.mouse.get_pos()
+                            if host_rect.collidepoint(mx, my):
+                                return 'host'
+                            if join_rect.collidepoint(mx, my):
+                                return 'join'
+                            if back_rect.collidepoint(mx, my):
+                                return 'back'
+                        if event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_ESCAPE:
+                                return 'back'
+                            if event.key == pygame.K_h:
+                                return 'host'
+                            if event.key == pygame.K_j:
+                                return 'join'
+
+                    # draw
+                    try:
+                        if getattr(menu, 'bg_surface', None):
+                            disp.blit(menu.bg_surface, (0,0))
+                        else:
+                            disp.fill((20,20,30))
+                    except Exception:
+                        disp.fill((20,20,30))
+
+                    title = menu.title_font.render('Play', True, (240,240,240))
+                    disp.blit(title, (WINDOW_WIDTH//2 - title.get_width()//2, 80))
+
+                    # buttons
+                    mx, my = pygame.mouse.get_pos()
+                    pygame.draw.rect(disp, (80,140,80) if host_rect.collidepoint(mx,my) else (60,120,60), host_rect, border_radius=8)
+                    pygame.draw.rect(disp, (80,140,80) if join_rect.collidepoint(mx,my) else (60,120,60), join_rect, border_radius=8)
+                    host_s = font.render('Host', True, (255,255,255))
+                    join_s = font.render('Join', True, (255,255,255))
+                    disp.blit(host_s, host_s.get_rect(center=host_rect.center))
+                    disp.blit(join_s, join_s.get_rect(center=join_rect.center))
+
+                    hint = font.render('H = Host, J = Join, Esc = Back', True, (200,200,200))
+                    disp.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT - 80))
+
+                    pygame.display.update()
+                    clock.tick(30)
+
+            pick = _pick_host_or_join(menu)
+            if pick == 'back':
+                continue
+
             # reload settings module so changes saved from menu are applied
             try:
                 importlib.reload(settings_mod)
@@ -1023,8 +1088,115 @@ if __name__ == "__main__":
             except Exception:
                 pass
 
+            if pick == 'host':
+                # start server in background and connect to localhost
+                try:
+                    cwd = os.path.dirname(__file__)
+                    # Use same Python executable to avoid PATH issues
+                    host_proc = subprocess.Popen([sys.executable, os.path.join(cwd, 'server.py'), '--auto-ip'], cwd=cwd)
+                    # give server a moment to bind sockets
+                    time.sleep(0.5)
+                    try:
+                        import settings as _smod
+                        _smod.server = '127.0.0.1'
+                        globals()['server'] = '127.0.0.1'
+                    except Exception:
+                        globals()['server'] = '127.0.0.1'
+                except Exception as e:
+                    print('Failed to start server:', e)
+
+            elif pick == 'join':
+                # attempt LAN discovery, fallback to manual input
+                chosen_ip = None
+                try:
+                    import network as netmod
+                    results = netmod.discover_servers(timeout=2.0)
+                    if results:
+                        # pick first discovered server by default
+                        chosen_ip = results[0]['ip']
+                except Exception:
+                    results = []
+
+                if not chosen_ip:
+                    # prompt for manual IP entry
+                    def _prompt_ip(menu):
+                        disp = menu.display_surface
+                        clock = menu.clock
+                        font = menu.font
+                        text = ''
+                        prompt_rect = pygame.Rect(220, WINDOW_HEIGHT//2 - 20, WINDOW_WIDTH - 440, 40)
+                        while True:
+                            for event in pygame.event.get():
+                                if event.type == pygame.QUIT:
+                                    return None
+                                if event.type == pygame.KEYDOWN:
+                                    if event.key == pygame.K_RETURN:
+                                        return text.strip()
+                                    elif event.key == pygame.K_BACKSPACE:
+                                        text = text[:-1]
+                                    elif event.key == pygame.K_ESCAPE:
+                                        return None
+                                    else:
+                                        ch = event.unicode
+                                        if ch:
+                                            text += ch
+                            try:
+                                if getattr(menu, 'bg_surface', None):
+                                    disp.blit(menu.bg_surface, (0,0))
+                                else:
+                                    disp.fill((20,20,30))
+                            except Exception:
+                                disp.fill((20,20,30))
+                            title = menu.title_font.render('Join - Enter IP', True, (240,240,240))
+                            disp.blit(title, (WINDOW_WIDTH//2 - title.get_width()//2, 120))
+                            pygame.draw.rect(disp, (30,30,40), prompt_rect)
+                            pygame.draw.rect(disp, (120,120,120), prompt_rect, 2)
+                            txt_s = font.render(text, True, (240,240,240))
+                            disp.blit(txt_s, (prompt_rect.x + 8, prompt_rect.y + 6))
+                            hint = font.render('Type server IP and press Enter. Esc to cancel.', True, (200,200,200))
+                            disp.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT - 80))
+                            pygame.display.update()
+                            clock.tick(30)
+
+                    ip = _prompt_ip(menu)
+                    if ip:
+                        chosen_ip = ip
+
+                # apply chosen server IP if available
+                if chosen_ip:
+                    try:
+                        import settings as _smod
+                        _smod.server = chosen_ip
+                        globals()['server'] = chosen_ip
+                    except Exception:
+                        globals()['server'] = chosen_ip
+
+            # start the game (client) after host/join selection
             game = Game()
             game.run()
+
+            # If we started a local server when hosting, terminate it so a fresh
+            # server can be launched for the next game. Use terminate() first
+            # and escalate to kill if it doesn't exit within a short timeout.
+            if host_proc is not None:
+                try:
+                    if host_proc.poll() is None:
+                        try:
+                            host_proc.terminate()
+                        except Exception:
+                            pass
+                        # wait a short moment for graceful exit
+                        try:
+                            host_proc.wait(timeout=1.0)
+                        except Exception:
+                            try:
+                                host_proc.kill()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                finally:
+                    host_proc = None
         elif choice == 'settings':
             # open settings editor. It will save to settings.py and reload the module.
             sm = SettingsMenu(menu.display_surface, menu.clock, menu.font, menu.title_font)

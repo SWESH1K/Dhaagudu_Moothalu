@@ -3,6 +3,79 @@ from _thread import *
 import sys
 import time
 from settings import *
+import threading
+import logging
+
+# Server logger: by default we silence server-side logs. The client may enable
+# or display logs as needed. To enable server logging for debugging set a
+# handler/level externally or modify this module.
+logger = logging.getLogger('dhaagudu.server')
+logger.addHandler(logging.NullHandler())
+
+# If started with --auto-ip, bind to all interfaces and let the responder
+# advertise the detected local IP instead of requiring settings.py to contain
+# a specific address.
+try:
+    if '--auto-ip' in sys.argv:
+        try:
+            server = ''
+        except Exception:
+            pass
+except Exception:
+    pass
+
+
+def _get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # doesn't have to be reachable; used to pick a suitable outbound iface
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+    return ip
+
+
+def _start_discovery_responder():
+    """Start a background UDP listener that replies to discovery broadcasts.
+    Responds with: DISCOVER_RESPONSE::<ip>::<port>
+    """
+    def _responder():
+        try:
+            dsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            dsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                dsock.bind(('', DISCOVERY_PORT))
+            except Exception:
+                try:
+                    dsock.bind((server, DISCOVERY_PORT))
+                except Exception:
+                    return
+            host_ip = server if server and server not in ('0.0.0.0', '') else _get_local_ip()
+            while True:
+                try:
+                    data, addr = dsock.recvfrom(1024)
+                    if not data:
+                        continue
+                    try:
+                        if data.strip() == b'DISCOVER_REQUEST':
+                            resp = f"DISCOVER_RESPONSE::{host_ip}::{port}".encode('utf-8')
+                            dsock.sendto(resp, addr)
+                    except Exception:
+                        continue
+                except Exception:
+                    # continue on intermittent errors
+                    continue
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_responder, daemon=True)
+    t.start()
 
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -10,7 +83,13 @@ s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
     s.bind((server, port))
 except socket.error as e:
-    print(str(e))
+    logger.error(str(e))
+
+# Start discovery responder so clients can find this server via UDP broadcasts
+try:
+    _start_discovery_responder()
+except Exception:
+    pass
 
 def read_pos(data):
     parts = data.split(",")
@@ -48,7 +127,7 @@ def make_pos(tup):
 
 # Listen for the configured number of players
 s.listen(NUM_PLAYERS)
-print(f"Waiting for connections (expecting {NUM_PLAYERS})... Server Started")
+logger.info(f"Waiting for connections (expecting {NUM_PLAYERS})... Server Started")
 
 # Server round start timestamp (epoch ms). Start at now - 30s so clients see -00:30 initially.
 ROUND_START_MS = None
@@ -79,7 +158,7 @@ def threaded_client(conn, player):
             raw = conn.recv(2048).decode("utf-8")
             data = read_pos(raw)
             pos[player] = data
-            print("data=", data)
+            logger.debug("data=%s", data)
             # If sender included a targeted CAUGHT event (format 'CAUGHT:<idx>')
             # and the sender is allowed to catch (we treat player 0 as seeker),
             # apply the caught state server-side so broadcasts are authoritative.
@@ -100,7 +179,7 @@ def threaded_client(conn, player):
                         # role variable is computed earlier for this connection
                         if role == 'seeker' and not frozen[target_idx]:
                             frozen[target_idx] = True
-                            print(f"Player {target_idx} frozen by seeker {player}")
+                            logger.info("Player %s frozen by seeker %s", target_idx, player)
                             # mark the target's pos equip field to CAUGHT:<target_idx> so clients will see who was caught
                             try:
                                 tx, ty, tstate, tframe, _, teframe = pos[target_idx]
@@ -122,17 +201,17 @@ def threaded_client(conn, player):
                 pass
  
             if not data:
-                print("Disconnected")
+                logger.info("Disconnected")
                 break
             else:
                 # build the authoritative positions payload for all clients
                 all_positions = "|".join([make_pos(p) for p in pos])
                 reply = all_positions
 
-                print("Received: ", data)
+                logger.debug("Received: %s", data)
                 # prepare reply augmented with role, round start and winner so clients stay in sync
                 send_payload = reply + "::" + role + "::" + str(ROUND_START_MS) + "::" + (str(WINNER_INDEX) if WINNER_INDEX is not None else 'None')
-                print("Broadcasting: ", send_payload)
+                logger.debug("Broadcasting: %s", send_payload)
 
                 # Broadcast authoritative state to all connected clients so events
                 # like CAUGHT propagate immediately (helps multi-player consistency).
@@ -152,13 +231,13 @@ def threaded_client(conn, player):
         except:
             break
 
-    print("Lost connection")
+    logger.info("Lost connection")
     conn.close()
 
 currentPlayer = 0
 while True:
     conn, addr = s.accept()
-    print("Connected to: " + addr[0] + ":" + str(addr[1]))
+    logger.info("Connected to: %s:%s", addr[0], addr[1])
     # keep a global list of connections to support broadcasting
     try:
         connections.append(conn)
@@ -169,7 +248,7 @@ while True:
     # recent connection filled the expected slots.
     if currentPlayer == (NUM_PLAYERS - 1):
         ROUND_START_MS = int(time.time() * 1000) + 30000
-        print(f"All {NUM_PLAYERS} players connected — starting round at", ROUND_START_MS)
+    logger.info(f"All {NUM_PLAYERS} players connected — starting round at {ROUND_START_MS}")
 
     start_new_thread(threaded_client, (conn, currentPlayer))
     currentPlayer += 1
