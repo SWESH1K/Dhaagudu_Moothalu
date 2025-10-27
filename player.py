@@ -5,10 +5,16 @@ from os import walk
 
 
 class Player(pygame.sprite.Sprite):
-    def __init__(self, pos, groups, collision_sprites, controlled=True, isSeeker=False):
+    def __init__(self, pos, groups, collision_sprites, controlled=True, isSeeker=False, name=None):
         super().__init__(groups)
         # Role flag: seeker cannot transform into objects
         self.isSeeker = bool(isSeeker)
+
+        # player display name (used to track players when joining/hosting)
+        try:
+            self.name = str(name) if name is not None else 'Player'
+        except Exception:
+            self.name = 'Player'
 
         # determine which skin folder to use. Default: seekers use 'player2',
         # hiders use 'player' unless explicitly overridden via isSeeker

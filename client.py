@@ -2,6 +2,7 @@ import pygame
 import sys
 import time
 import math
+import json
 from network import Network
 from settings import *
 from player import Player
@@ -12,6 +13,7 @@ from groups import AllSprites
 import subprocess
 import os
 import sys
+import socket
 
 
 class Game:
@@ -48,36 +50,74 @@ class Game:
             # returns (positions_list, player_index_or_None, role_or_None, round_start_or_None, winner_index_or_None)
             if resp is None:
                 return ([], None, None, None, None)
-            # metadata parts are separated by '::' and the server appends: [player_index]::[role]::[round_start]::[winner]
-            parts = resp.split('::')
-            # default values
+            # if server sent JSON, parse it directly
+            try:
+                j = json.loads(resp)
+                if isinstance(j, dict) and 'positions' in j:
+                    positions = []
+                    for p in j.get('positions', []):
+                        try:
+                            x = int(p.get('x', 0))
+                        except Exception:
+                            x = 0
+                        try:
+                            y = int(p.get('y', 0))
+                        except Exception:
+                            y = 0
+                        state = p.get('state', 'down')
+                        try:
+                            frame = int(p.get('frame', 0))
+                        except Exception:
+                            frame = 0
+                        equip = p.get('equip', 'None')
+                        try:
+                            equip_frame = int(p.get('equip_frame', 0))
+                        except Exception:
+                            equip_frame = 0
+                        name = p.get('name')
+                        positions.append((x, y, state, frame, equip, equip_frame, name))
+                    player_index = j.get('player_index')
+                    role = j.get('role')
+                    round_start = j.get('round_start')
+                    winner = j.get('winner')
+                    return (positions, player_index, role, round_start, winner)
+            except Exception:
+                pass
+            # Server appends trailing metadata separated by '::'. Use rsplit to
+            # safely extract trailing fields and avoid accidental inclusion in names.
+            try:
+                parts = resp.rsplit('::', 4)
+            except Exception:
+                parts = [resp]
+
             player_index = None
             role = None
             round_start = None
             winner = None
-            if len(parts) >= 4:
-                # winner is the last part
-                winner = parts[-1] if parts[-1] != 'None' else None
-                # round_start is second-last
+
+            if len(parts) == 5:
+                all_positions_str, player_idx_s, role_s, round_s, winner_s = parts
                 try:
-                    round_start = int(parts[-2])
+                    player_index = int(player_idx_s)
+                except Exception:
+                    player_index = None
+                role = role_s if role_s != 'None' else None
+                try:
+                    round_start = int(round_s)
                 except Exception:
                     round_start = None
-                # role is third-last
-                role = parts[-3] if parts[-3] != 'None' else None
-                # player_index may be fourth-last (initial reply)
-                if len(parts) >= 5:
-                    try:
-                        player_index = int(parts[-4])
-                        all_positions_str = '::'.join(parts[:-4])
-                    except Exception:
-                        player_index = None
-                        all_positions_str = '::'.join(parts[:-3])
-                else:
-                    all_positions_str = '::'.join(parts[:-3])
+                winner = winner_s if winner_s != 'None' else None
+            elif len(parts) == 4:
+                # Non-initial reply: no player index
+                all_positions_str, role_s, round_s, winner_s = parts
+                role = role_s if role_s != 'None' else None
+                try:
+                    round_start = int(round_s)
+                except Exception:
+                    round_start = None
+                winner = winner_s if winner_s != 'None' else None
             else:
-                # fallback: old single-position comma format
-                all_positions_str = resp
+                all_positions_str = parts[0]
 
             positions = []
             try:
@@ -102,7 +142,15 @@ class Game:
                             equip_frame = int(parts_c[5]) if len(parts_c) >= 6 else 0
                         except Exception:
                             equip_frame = 0
-                        positions.append((x, y, state, frame, equip_id, equip_frame))
+                        # optional name field
+                        name = parts_c[6] if len(parts_c) >= 7 else None
+                        # strip any stray metadata markers from name
+                        if isinstance(name, str):
+                            try:
+                                name = name.split('::')[0].strip()
+                            except Exception:
+                                name = name.strip()
+                        positions.append((x, y, state, frame, equip_id, equip_frame, name))
             except Exception:
                 positions = []
 
@@ -197,13 +245,23 @@ class Game:
         try:
             # If we parsed positions_list above and my_index exists, create remotes
             if positions_list and my_index is not None:
-                for idx, p in enumerate(positions_list):
-                    if idx == my_index:
-                        continue
-                    px, py = p[0], p[1]
-                    is_seeker = (idx == 0)
-                    remote = Player((px, py), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
-                    self.remote_map[idx] = remote
+                        for idx, p in enumerate(positions_list):
+                            if idx == my_index:
+                                continue
+                            px, py = p[0], p[1]
+                            is_seeker = (idx == 0)
+                            # pass name if available to Player constructor or set after
+                            try:
+                                pname = p[6] if len(p) >= 7 else None
+                            except Exception:
+                                pname = None
+                            remote = Player((px, py), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
+                            try:
+                                if pname:
+                                    remote.name = pname
+                            except Exception:
+                                pass
+                            self.remote_map[idx] = remote
             else:
                 # Fallback: create a single remote player at an offset for older server behavior
                 remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
@@ -557,8 +615,11 @@ class Game:
                                     try:
                                         px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
                                         payload = (px, py, self.player.state, int(self.player.frame_index), str(self.player._caught), 0)
-                                        # send once immediately
-                                        _ = self.network.send(self.make_pos(payload))
+                                        # send once immediately (non-blocking)
+                                        try:
+                                            self.network.send(self.make_pos(payload), wait_for_reply=False)
+                                        except Exception:
+                                            pass
                                         # clear transient _caught after sending
                                         try:
                                             if hasattr(self.player, '_caught'):
@@ -610,8 +671,35 @@ class Game:
                 equip_id = 'None'
                 equip_frame = 0
 
-            payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame)
-            resp = self.network.send(self.make_pos(payload))
+            # include player name and send as JSON
+            try:
+                safe_name = (getattr(self.player, 'name', '') or '')
+            except Exception:
+                safe_name = ''
+            payload_obj = {
+                'x': px,
+                'y': py,
+                'state': self.player.state,
+                'frame': int(self.player.frame_index),
+                'equip': equip_id,
+                'equip_frame': equip_frame,
+                'name': safe_name
+            }
+            try:
+                # non-blocking send: server broadcasts will be received by background thread
+                self.network.send(json.dumps(payload_obj), wait_for_reply=False)
+            except Exception:
+                # fallback to old CSV if needed
+                payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame, safe_name.replace(',', ''))
+                try:
+                    self.network.send(self.make_pos(payload), wait_for_reply=False)
+                except Exception:
+                    pass
+            # poll for any incoming server broadcast (non-blocking)
+            try:
+                resp = self.network.get_latest()
+            except Exception:
+                resp = None
             # clear transient whistle emit so it is only broadcast once
             try:
                 if hasattr(self.player, '_whistle_emit'):
@@ -631,24 +719,67 @@ class Game:
                     # returns (positions_list, round_start_or_None, winner_or_None)
                     if resp is None:
                         return ([], None, None)
-                    parts = resp.split('::')
-                    # default
+                    # if server sent JSON, parse it directly
+                    try:
+                        j = json.loads(resp)
+                        if isinstance(j, dict) and 'positions' in j:
+                            positions = []
+                            for p in j.get('positions', []):
+                                try:
+                                    x = int(p.get('x', 0))
+                                except Exception:
+                                    x = 0
+                                try:
+                                    y = int(p.get('y', 0))
+                                except Exception:
+                                    y = 0
+                                state = p.get('state', 'down')
+                                try:
+                                    frame = int(p.get('frame', 0))
+                                except Exception:
+                                    frame = 0
+                                equip = p.get('equip', 'None')
+                                try:
+                                    equip_frame = int(p.get('equip_frame', 0))
+                                except Exception:
+                                    equip_frame = 0
+                                name = p.get('name')
+                                # sanitize
+                                if isinstance(name, str):
+                                    try:
+                                        name = name.split('::')[0].strip()
+                                    except Exception:
+                                        name = name.strip()
+                                positions.append((x, y, state, frame, equip, equip_frame, name))
+                            round_start = j.get('round_start')
+                            winner = j.get('winner')
+                            return (positions, round_start, winner)
+                    except Exception:
+                        pass
+                    # split off trailing metadata safely using rsplit so names
+                    # don't accidentally absorb the trailing '::role::round::winner'
+                    try:
+                        parts = resp.rsplit('::', 3)
+                    except Exception:
+                        parts = [resp]
                     round_start = None
                     winner = None
-                    if len(parts) >= 3:
-                        # winner appended as last part
-                        winner = parts[-1] if parts[-1] != 'None' else None
+                    if len(parts) == 4:
+                        all_positions_str, role_s, round_s, winner_s = parts
                         try:
-                            round_start = int(parts[-2])
+                            round_start = int(round_s)
                         except Exception:
                             round_start = None
-                        # all_positions may be everything before the trailing metadata
-                        if len(parts) >= 4:
-                            all_positions_str = '::'.join(parts[:-3])
-                        else:
-                            all_positions_str = '::'.join(parts[:-2])
+                        winner = winner_s if winner_s != 'None' else None
+                    elif len(parts) == 3:
+                        all_positions_str, round_s, winner_s = parts
+                        try:
+                            round_start = int(round_s)
+                        except Exception:
+                            round_start = None
+                        winner = winner_s if winner_s != 'None' else None
                     else:
-                        all_positions_str = resp
+                        all_positions_str = parts[0]
 
                     positions = []
                     try:
@@ -672,7 +803,14 @@ class Game:
                                     equip_frame = int(parts_c[5]) if len(parts_c) >= 6 else 0
                                 except Exception:
                                     equip_frame = 0
-                                positions.append((x, y, state, frame, equip_id, equip_frame))
+                                name = parts_c[6] if len(parts_c) >= 7 else None
+                                # sanitize
+                                if isinstance(name, str):
+                                    try:
+                                        name = name.split('::')[0].strip()
+                                    except Exception:
+                                        name = name.strip()
+                                positions.append((x, y, state, frame, equip_id, equip_frame, name))
                     except Exception:
                         positions = []
 
@@ -713,7 +851,15 @@ class Game:
                     frozen_count = 0
                     total_hidders = max(0, NUM_PLAYERS - 1)
                     for idx, p in enumerate(positions_list):
-                        x, y, state, frame, equip_id, equip_frame = p
+                        # support both 6-field and 7-field tuples
+                        try:
+                            x, y, state, frame, equip_id, equip_frame, pname = p
+                        except Exception:
+                            try:
+                                x, y, state, frame, equip_id, equip_frame = p
+                                pname = None
+                            except Exception:
+                                continue
                         # If this entry is the local player, update nothing (local authoritative)
                         # else apply to corresponding remote player
                         if hasattr(self, 'server_round_base') and self.server_round_base is None:
@@ -723,6 +869,12 @@ class Game:
                             rp = self.remote_map[idx]
                             try:
                                 rp.set_remote_state((x, y), state, frame, equip_frame)
+                                # update remote player's name if provided
+                                try:
+                                    if pname:
+                                        rp.name = pname
+                                except Exception:
+                                    pass
                             except Exception:
                                 try:
                                     rp.rect.center = (x, y)
@@ -850,6 +1002,37 @@ class Game:
             # draw (render the world once, centered on the local player)
             self.display_surface.fill((30, 30, 30))
             self.all_sprites.draw(self.player.rect.center)
+            # Draw player names above each character (remote and local)
+            try:
+                # remote players
+                offset = getattr(self.all_sprites, 'offset', pygame.math.Vector2(0,0))
+                for idx, rp in (getattr(self, 'remote_map', {})).items():
+                    try:
+                        name = getattr(rp, 'name', None)
+                        if name:
+                            nm_s = self.font.render(str(name), True, (255, 255, 255))
+                            x = rp.rect.centerx + offset.x - nm_s.get_width()//2
+                            y = rp.rect.top + offset.y - nm_s.get_height() - 6
+                            # draw subtle shadow for readability
+                            shadow = self.font.render(str(name), True, (0,0,0))
+                            self.display_surface.blit(shadow, (x+1, y+1))
+                            self.display_surface.blit(nm_s, (x, y))
+                    except Exception:
+                        pass
+                # local player
+                try:
+                    lname = getattr(self.player, 'name', None)
+                    if lname:
+                        ln_s = self.font.render(str(lname), True, (200, 220, 255))
+                        lx = self.player.rect.centerx + offset.x - ln_s.get_width()//2
+                        ly = self.player.rect.top + offset.y - ln_s.get_height() - 6
+                        shadow = self.font.render(str(lname), True, (0,0,0))
+                        self.display_surface.blit(shadow, (lx+1, ly+1))
+                        self.display_surface.blit(ln_s, (lx, ly))
+                except Exception:
+                    pass
+            except Exception:
+                pass
             # HUD: show role and hint for hidders
             try:
                 role_text = "Role: Seeker" if getattr(self.player, 'isSeeker', False) else "Role: Hidder"
@@ -1015,6 +1198,51 @@ if __name__ == "__main__":
     while True:
         choice = menu.run()
         if choice == 'play':
+            # Prompt for player name first (Play -> Name -> Host/Join)
+            def _prompt_name(menu):
+                disp = menu.display_surface
+                clock = menu.clock
+                font = menu.font
+                title_font = menu.title_font
+                text = ''
+                prompt_rect = pygame.Rect(220, WINDOW_HEIGHT//2 - 20, WINDOW_WIDTH - 440, 40)
+                while True:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            return None
+                        if event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_RETURN:
+                                return text.strip() if text.strip() else None
+                            if event.key == pygame.K_ESCAPE:
+                                return None
+                            if event.key == pygame.K_BACKSPACE:
+                                text = text[:-1]
+                            else:
+                                ch = event.unicode
+                                if ch:
+                                    text += ch
+                    try:
+                        if getattr(menu, 'bg_surface', None):
+                            disp.blit(menu.bg_surface, (0,0))
+                        else:
+                            disp.fill((20,20,30))
+                    except Exception:
+                        disp.fill((20,20,30))
+                    title = title_font.render('Enter your name', True, (240,240,240))
+                    disp.blit(title, (WINDOW_WIDTH//2 - title.get_width()//2, 120))
+                    pygame.draw.rect(disp, (30,30,40), prompt_rect)
+                    pygame.draw.rect(disp, (120,120,120), prompt_rect, 2)
+                    txt_s = font.render(text, True, (240,240,240))
+                    disp.blit(txt_s, (prompt_rect.x + 8, prompt_rect.y + 6))
+                    hint = font.render('Type your name and press Enter. Esc to cancel.', True, (200,200,200))
+                    disp.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT - 80))
+                    pygame.display.update()
+                    clock.tick(30)
+
+            player_name = _prompt_name(menu)
+            if not player_name:
+                continue
+
             # Offer Host / Join selection before starting a game
             def _pick_host_or_join(menu):
                 disp = menu.display_surface
@@ -1089,90 +1317,373 @@ if __name__ == "__main__":
                 pass
 
             if pick == 'host':
-                # start server in background and connect to localhost
+                # Prompt for host configuration: port, number of players, player name
+                def _host_config_prompt(menu, initial_name=None):
+                    """Simplified, compact host configuration modal.
+                    Fields: Hosting name (text), Port (digits), Players (click +/-)
+                    Only responds to click events for +/- to avoid sensitivity.
+                    """
+                    disp = menu.display_surface
+                    clock = menu.clock
+                    font = menu.font
+
+                    # defaults
+                    try:
+                        import settings as _smod
+                        default_port = getattr(_smod, 'port', 5555)
+                        default_players = getattr(_smod, 'NUM_PLAYERS', 2)
+                    except Exception:
+                        default_port = 5555
+                        default_players = 2
+
+                    name_str = (initial_name or 'Player')[:20]
+                    port_str = str(default_port)
+                    players_val = int(default_players)
+                    active = None
+                    error_msg = ''
+
+                    panel_w = 360
+                    panel_h = 200
+                    panel_rect = pygame.Rect((WINDOW_WIDTH - panel_w)//2, (WINDOW_HEIGHT - panel_h)//2, panel_w, panel_h)
+
+                    # rows
+                    pad = 16
+                    row_h = 36
+                    name_rect = pygame.Rect(panel_rect.x + pad, panel_rect.y + 28, panel_w - pad*2, row_h)
+                    port_rect = pygame.Rect(panel_rect.x + pad, name_rect.bottom + 8, 120, row_h)
+                    players_rect = pygame.Rect(port_rect.right + 12, name_rect.bottom + 8, 60, row_h)
+
+                    minus_rect = pygame.Rect(players_rect.right + 6, players_rect.y, 32, row_h)
+                    plus_rect = pygame.Rect(minus_rect.right + 8, minus_rect.y, 32, row_h)
+
+                    start_rect = pygame.Rect(panel_rect.centerx - 80, panel_rect.bottom - 44, 82, 32)
+                    cancel_rect = pygame.Rect(panel_rect.centerx + 8, panel_rect.bottom - 44, 87, 32)
+
+                    while True:
+                        for event in pygame.event.get():
+                            if event.type == pygame.QUIT:
+                                return None
+                            if event.type == pygame.KEYDOWN:
+                                if event.key == pygame.K_ESCAPE:
+                                    return None
+                                if active == 'name':
+                                    if event.key == pygame.K_BACKSPACE:
+                                        name_str = name_str[:-1]
+                                    else:
+                                        ch = event.unicode
+                                        if ch and len(name_str) < 20:
+                                            name_str += ch
+                                elif active == 'port':
+                                    if event.key == pygame.K_BACKSPACE:
+                                        port_str = port_str[:-1]
+                                    else:
+                                        ch = event.unicode
+                                        if ch and ch.isdigit() and len(port_str) < 5:
+                                            port_str += ch
+                            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                                mx, my = pygame.mouse.get_pos()
+                                if name_rect.collidepoint(mx, my):
+                                    active = 'name'
+                                elif port_rect.collidepoint(mx, my):
+                                    active = 'port'
+                                elif minus_rect.collidepoint(mx, my):
+                                    players_val = max(2, players_val - 1)
+                                elif plus_rect.collidepoint(mx, my):
+                                    players_val = min(16, players_val + 1)
+                                elif start_rect.collidepoint(mx, my):
+                                    # validate
+                                    try:
+                                        port_val = int(port_str)
+                                    except Exception:
+                                        error_msg = 'Port must be a number'
+                                        continue
+                                    # check port availability
+                                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                    try:
+                                        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                        s.bind(('', port_val))
+                                    except Exception:
+                                        error_msg = f'Port {port_val} is not available'
+                                        try:
+                                            s.close()
+                                        except Exception:
+                                            pass
+                                        continue
+                                    finally:
+                                        try:
+                                            s.close()
+                                        except Exception:
+                                            pass
+                                    if players_val < 2:
+                                        error_msg = 'Players must be >= 2'
+                                        continue
+                                    return (port_val, players_val, name_str.strip())
+                                elif cancel_rect.collidepoint(mx, my):
+                                    return None
+
+                        # draw
+                        try:
+                            if getattr(menu, 'bg_surface', None):
+                                disp.blit(menu.bg_surface, (0,0))
+                            else:
+                                disp.fill((18,18,28))
+                        except Exception:
+                            disp.fill((18,18,28))
+
+                        pygame.draw.rect(disp, (30,30,36), panel_rect, border_radius=8)
+
+                        # title
+                        title_s = font.render('Host', True, (240,240,240))
+                        disp.blit(title_s, (panel_rect.x + 12, panel_rect.y-3))
+
+                        # name field
+                        pygame.draw.rect(disp, (22,22,26), name_rect)
+                        pygame.draw.rect(disp, (200,200,200) if active=='name' else (80,80,90), name_rect, 2)
+                        ns = font.render(name_str or 'Player name', True, (230,230,230))
+                        disp.blit(ns, (name_rect.x + 8, name_rect.y + 6))
+
+                        # port
+                        pygame.draw.rect(disp, (22,22,26), port_rect)
+                        pygame.draw.rect(disp, (200,200,200) if active=='port' else (80,80,90), port_rect, 2)
+                        ps = font.render(port_str, True, (230,230,230))
+                        disp.blit(ps, (port_rect.x + 8, port_rect.y + 6))
+
+                        # players +/-
+                        pygame.draw.rect(disp, (22,22,26), players_rect)
+                        pygame.draw.rect(disp, (80,80,90), players_rect, 2)
+                        pv = font.render(str(players_val), True, (230,230,230))
+                        disp.blit(pv, (players_rect.x + 10, players_rect.y + 6))
+
+                        pygame.draw.rect(disp, (80,80,80), minus_rect)
+                        pygame.draw.rect(disp, (80,80,80), plus_rect)
+                        disp.blit(font.render('-', True, (255,255,255)), (minus_rect.x + 8, minus_rect.y + 6))
+                        disp.blit(font.render('+', True, (255,255,255)), (plus_rect.x + 6, plus_rect.y + 6))
+
+                        # buttons
+                        mx, my = pygame.mouse.get_pos()
+                        pygame.draw.rect(disp, (60,140,60) if start_rect.collidepoint((mx,my)) else (50,120,50), start_rect, border_radius=6)
+                        pygame.draw.rect(disp, (140,60,60) if cancel_rect.collidepoint((mx,my)) else (120,50,50), cancel_rect, border_radius=6)
+                        disp.blit(font.render('Start', True, (255,255,255)), (start_rect.x + 3, start_rect.y + 6))
+                        disp.blit(font.render('Cancel', True, (255,255,255)), (cancel_rect.x + 3, cancel_rect.y + 6))
+
+                        if error_msg:
+                            em = font.render(error_msg, True, (220,100,100))
+                            disp.blit(em, (panel_rect.centerx - em.get_width()//2, panel_rect.bottom - 76))
+
+                        pygame.display.update()
+                        clock.tick(30)
+
+                cfg = _host_config_prompt(menu, initial_name=player_name)
+                if not cfg:
+                    continue
+                chosen_port, chosen_players, chosen_name = cfg
+
+                # start server in background and connect to localhost using chosen port/players
                 try:
                     cwd = os.path.dirname(__file__)
                     # Use same Python executable to avoid PATH issues
-                    host_proc = subprocess.Popen([sys.executable, os.path.join(cwd, 'server.py'), '--auto-ip'], cwd=cwd)
+                    host_proc = subprocess.Popen([sys.executable, os.path.join(cwd, 'server.py'), '--auto-ip', '--port', str(chosen_port), '--num-players', str(chosen_players)], cwd=cwd)
                     # give server a moment to bind sockets
                     time.sleep(0.5)
                     try:
                         import settings as _smod
                         _smod.server = '127.0.0.1'
+                        _smod.port = chosen_port
+                        _smod.NUM_PLAYERS = chosen_players
                         globals()['server'] = '127.0.0.1'
+                        globals()['port'] = chosen_port
+                        globals()['NUM_PLAYERS'] = chosen_players
+                        # store player name for use after Game constructed
+                        globals()['PLAYER_NAME'] = chosen_name
                     except Exception:
                         globals()['server'] = '127.0.0.1'
+                        globals()['port'] = chosen_port
+                        globals()['NUM_PLAYERS'] = chosen_players
+                        globals()['PLAYER_NAME'] = chosen_name
                 except Exception as e:
                     print('Failed to start server:', e)
 
             elif pick == 'join':
-                # attempt LAN discovery, fallback to manual input
+                # Show a simple server browser using LAN discovery with click-to-join
                 chosen_ip = None
                 try:
                     import network as netmod
-                    results = netmod.discover_servers(timeout=2.0)
-                    if results:
-                        # pick first discovered server by default
-                        chosen_ip = results[0]['ip']
                 except Exception:
-                    results = []
+                    netmod = None
 
-                if not chosen_ip:
-                    # prompt for manual IP entry
-                    def _prompt_ip(menu):
-                        disp = menu.display_surface
-                        clock = menu.clock
-                        font = menu.font
-                        text = ''
-                        prompt_rect = pygame.Rect(220, WINDOW_HEIGHT//2 - 20, WINDOW_WIDTH - 440, 40)
-                        while True:
-                            for event in pygame.event.get():
-                                if event.type == pygame.QUIT:
+                def _prompt_ip(menu):
+                    disp = menu.display_surface
+                    clock = menu.clock
+                    font = menu.font
+                    text = ''
+                    prompt_rect = pygame.Rect(220, WINDOW_HEIGHT//2 - 20, WINDOW_WIDTH - 440, 40)
+                    while True:
+                        for event in pygame.event.get():
+                            if event.type == pygame.QUIT:
+                                return None
+                            if event.type == pygame.KEYDOWN:
+                                if event.key == pygame.K_RETURN:
+                                    return text.strip()
+                                elif event.key == pygame.K_BACKSPACE:
+                                    text = text[:-1]
+                                elif event.key == pygame.K_ESCAPE:
                                     return None
-                                if event.type == pygame.KEYDOWN:
-                                    if event.key == pygame.K_RETURN:
-                                        return text.strip()
-                                    elif event.key == pygame.K_BACKSPACE:
-                                        text = text[:-1]
-                                    elif event.key == pygame.K_ESCAPE:
-                                        return None
-                                    else:
-                                        ch = event.unicode
-                                        if ch:
-                                            text += ch
-                            try:
-                                if getattr(menu, 'bg_surface', None):
-                                    disp.blit(menu.bg_surface, (0,0))
                                 else:
-                                    disp.fill((20,20,30))
-                            except Exception:
+                                    ch = event.unicode
+                                    if ch:
+                                        text += ch
+                        try:
+                            if getattr(menu, 'bg_surface', None):
+                                disp.blit(menu.bg_surface, (0,0))
+                            else:
                                 disp.fill((20,20,30))
-                            title = menu.title_font.render('Join - Enter IP', True, (240,240,240))
-                            disp.blit(title, (WINDOW_WIDTH//2 - title.get_width()//2, 120))
-                            pygame.draw.rect(disp, (30,30,40), prompt_rect)
-                            pygame.draw.rect(disp, (120,120,120), prompt_rect, 2)
-                            txt_s = font.render(text, True, (240,240,240))
-                            disp.blit(txt_s, (prompt_rect.x + 8, prompt_rect.y + 6))
-                            hint = font.render('Type server IP and press Enter. Esc to cancel.', True, (200,200,200))
-                            disp.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT - 80))
-                            pygame.display.update()
-                            clock.tick(30)
+                        except Exception:
+                            disp.fill((20,20,30))
+                        title = menu.title_font.render('Join - Enter IP', True, (240,240,240))
+                        disp.blit(title, (WINDOW_WIDTH//2 - title.get_width()//2, 120))
+                        pygame.draw.rect(disp, (30,30,40), prompt_rect)
+                        pygame.draw.rect(disp, (120,120,120), prompt_rect, 2)
+                        txt_s = font.render(text, True, (240,240,240))
+                        disp.blit(txt_s, (prompt_rect.x + 8, prompt_rect.y + 6))
+                        hint = font.render('Type server IP and press Enter. Esc to cancel.', True, (200,200,200))
+                        disp.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT - 80))
+                        pygame.display.update()
+                        clock.tick(30)
 
-                    ip = _prompt_ip(menu)
-                    if ip:
-                        chosen_ip = ip
+                def _select_server(menu):
+                    disp = menu.display_surface
+                    clock = menu.clock
+                    font = menu.font
 
-                # apply chosen server IP if available
+                    # UI rects
+                    back_rect = menu.quit_rect
+                    refresh_rect = pygame.Rect(WINDOW_WIDTH - 180, 24, 160, 36)
+                    manual_rect = pygame.Rect(WINDOW_WIDTH - 360, 24, 160, 36)
+
+                    results = []
+                    selected = None
+
+                    def _refresh():
+                        nonlocal results
+                        results = []
+                        if netmod:
+                            try:
+                                results = netmod.discover_servers(timeout=1.5)
+                            except Exception:
+                                results = []
+
+                    _refresh()
+
+                    while True:
+                        for event in pygame.event.get():
+                            if event.type == pygame.QUIT:
+                                return None
+                            if event.type == pygame.KEYDOWN:
+                                if event.key == pygame.K_ESCAPE:
+                                    return None
+                                if event.key == pygame.K_r:
+                                    _refresh()
+                                if event.key == pygame.K_m:
+                                    ip = _prompt_ip(menu)
+                                    return ip
+                            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                                mx, my = pygame.mouse.get_pos()
+                                if back_rect.collidepoint(mx, my):
+                                    return None
+                                if refresh_rect.collidepoint(mx, my):
+                                    _refresh()
+                                if manual_rect.collidepoint(mx, my):
+                                    ip = _prompt_ip(menu)
+                                    return ip
+                                # check clicks on server list
+                                y_start = 120
+                                item_h = 48
+                                for idx, r in enumerate(results):
+                                    item_rect = pygame.Rect(120, y_start + idx * (item_h + 8), WINDOW_WIDTH - 240, item_h)
+                                    if item_rect.collidepoint(mx, my):
+                                        # join this server (return full record)
+                                        return r
+
+                        # draw
+                        try:
+                            if getattr(menu, 'bg_surface', None):
+                                disp.blit(menu.bg_surface, (0,0))
+                            else:
+                                disp.fill((20,20,30))
+                        except Exception:
+                            disp.fill((20,20,30))
+
+                        title = menu.title_font.render('Join - Available Servers', True, (240,240,240))
+                        disp.blit(title, (WINDOW_WIDTH//2 - title.get_width()//2, 40))
+
+                        # action buttons
+                        pygame.draw.rect(disp, (60,120,60), refresh_rect, border_radius=6)
+                        pygame.draw.rect(disp, (60,120,60), manual_rect, border_radius=6)
+                        rtxt = font.render('Refresh (R)', True, (255,255,255))
+                        mtxt = font.render('Manual IP (M)', True, (255,255,255))
+                        disp.blit(rtxt, (refresh_rect.x + 10, refresh_rect.y + 6))
+                        disp.blit(mtxt, (manual_rect.x + 8, manual_rect.y + 6))
+
+                        hint = font.render('Click a server to join, M = manual IP, R = refresh, Esc = Back', True, (200,200,200))
+                        disp.blit(hint, (WINDOW_WIDTH//2 - hint.get_width()//2, WINDOW_HEIGHT - 80))
+
+                        # list results
+                        y = 120
+                        if not results:
+                            no_s = font.render('No servers discovered on LAN', True, (220,220,220))
+                            disp.blit(no_s, (WINDOW_WIDTH//2 - no_s.get_width()//2, y))
+                        else:
+                            item_h = 48
+                            mx, my = pygame.mouse.get_pos()
+                            for idx, r in enumerate(results):
+                                item_rect = pygame.Rect(120, y + idx * (item_h + 8), WINDOW_WIDTH - 240, item_h)
+                                hover = item_rect.collidepoint(mx, my)
+                                pygame.draw.rect(disp, (100,180,100) if hover else (60,120,60), item_rect, border_radius=6)
+                                host_name = r.get('name') or f"{r.get('ip')}"
+                                title = f"{host_name}'s Server"
+                                subtitle = f"{r.get('ip')}:{r.get('port')}"
+                                t = font.render(title, True, (255,255,255))
+                                st = font.render(subtitle, True, (200,200,200))
+                                disp.blit(t, (item_rect.x + 12, item_rect.y + 6))
+                                disp.blit(st, (item_rect.x + 12, item_rect.y + 6 + t.get_height()))
+
+                        pygame.display.update()
+                        clock.tick(30)
+
+                # Run server selector
+                sel = _select_server(menu)
+
+                if sel:
+                    # sel is a dict with ip/port/name
+                    chosen_ip = sel.get('ip')
+                    chosen_port = sel.get('port')
+
+                # apply chosen server IP/port if available
                 if chosen_ip:
                     try:
                         import settings as _smod
                         _smod.server = chosen_ip
+                        _smod.port = chosen_port
                         globals()['server'] = chosen_ip
+                        globals()['port'] = chosen_port
                     except Exception:
                         globals()['server'] = chosen_ip
+                        globals()['port'] = chosen_port
 
             # start the game (client) after host/join selection
             game = Game()
+            # apply chosen player name from the name prompt (or fallback to global)
+            try:
+                try:
+                    game.player.name = player_name
+                except Exception:
+                    if 'PLAYER_NAME' in globals():
+                        try:
+                            game.player.name = globals().get('PLAYER_NAME')
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             game.run()
 
             # If we started a local server when hosting, terminate it so a fresh

@@ -5,6 +5,8 @@ import time
 from settings import *
 import threading
 import logging
+import json
+import copy
 
 # Server logger: by default we silence server-side logs. The client may enable
 # or display logs as needed. To enable server logging for debugging set a
@@ -21,6 +23,52 @@ try:
             server = ''
         except Exception:
             pass
+except Exception:
+    pass
+
+# Allow overriding port and number of players via command-line arguments
+try:
+    for i, a in enumerate(sys.argv):
+        if a == '--port' and i + 1 < len(sys.argv):
+            try:
+                port = int(sys.argv[i + 1])
+            except Exception:
+                pass
+        if a == '--num-players' and i + 1 < len(sys.argv):
+            try:
+                NUM_PLAYERS = int(sys.argv[i + 1])
+            except Exception:
+                pass
+        if a == '--host-name' and i + 1 < len(sys.argv):
+            try:
+                HOST_NAME = sys.argv[i + 1]
+            except Exception:
+                HOST_NAME = None
+except Exception:
+    pass
+
+# default host name if not provided
+try:
+    HOST_NAME
+except NameError:
+    import socket as _socket
+    try:
+        HOST_NAME = _socket.gethostname()
+    except Exception:
+        HOST_NAME = 'Host'
+# Allow overriding port and number of players via command-line arguments
+try:
+    for i, a in enumerate(sys.argv):
+        if a == '--port' and i + 1 < len(sys.argv):
+            try:
+                port = int(sys.argv[i + 1])
+            except Exception:
+                pass
+        if a == '--num-players' and i + 1 < len(sys.argv):
+            try:
+                NUM_PLAYERS = int(sys.argv[i + 1])
+            except Exception:
+                pass
 except Exception:
     pass
 
@@ -64,7 +112,8 @@ def _start_discovery_responder():
                         continue
                     try:
                         if data.strip() == b'DISCOVER_REQUEST':
-                            resp = f"DISCOVER_RESPONSE::{host_ip}::{port}".encode('utf-8')
+                            # include host name in discovery response so clients can show it
+                            resp = f"DISCOVER_RESPONSE::{host_ip}::{port}::{HOST_NAME}".encode('utf-8')
                             dsock.sendto(resp, addr)
                     except Exception:
                         continue
@@ -92,9 +141,15 @@ except Exception:
     pass
 
 def read_pos(data):
-    parts = data.split(",")
-    x = int(parts[0])
-    y = int(parts[1])
+    """Backward-compatible CSV parser for older clients.
+    Returns a dict with keys: x,y,state,frame,equip,equip_frame,name
+    """
+    try:
+        parts = data.split(",")
+        x = int(parts[0])
+        y = int(parts[1])
+    except Exception:
+        return None
     if len(parts) >= 4:
         state = parts[2]
         try:
@@ -104,26 +159,21 @@ def read_pos(data):
     else:
         state = 'down'
         frame = 0
-    # optional equip id
-    if len(parts) >= 5:
-        equip_id = parts[4]
-    else:
-        equip_id = 'None'
-
-    # optional equip_frame
-    if len(parts) >= 6:
-        try:
-            equip_frame = int(parts[5])
-        except Exception:
-            equip_frame = 0
-    else:
+    equip = parts[4] if len(parts) >= 5 else 'None'
+    try:
+        equip_frame = int(parts[5]) if len(parts) >= 6 else 0
+    except Exception:
         equip_frame = 0
+    name = parts[6] if len(parts) >= 7 else ''
+    return {'x': x, 'y': y, 'state': state, 'frame': frame, 'equip': equip, 'equip_frame': equip_frame, 'name': name}
 
-    return (x, y, state, frame, equip_id, equip_frame)
 
 def make_pos(tup):
-    # join any tuple elements into comma-separated string
-    return ",".join(map(str, tup))
+    # simple CSV joiner used for backward-compatible fallback replies
+    try:
+        return ",".join(map(str, tup))
+    except Exception:
+        return ""
 
 # Listen for the configured number of players
 s.listen(NUM_PLAYERS)
@@ -135,10 +185,11 @@ ROUND_START_MS = None
 # authoritative winner index when round ends (None when ongoing)
 WINNER_INDEX = None
 
-default_pos = (1272, 2018, 'down', 0, 'None', 0)
+# default pos now represented as a dict (JSON-friendly)
+default_pos = {'x': 1272, 'y': 2018, 'state': 'down', 'frame': 0, 'equip': 'None', 'equip_frame': 0, 'name': 'Player'}
 # create a list of default positions sized to NUM_PLAYERS. Each entry will be
 # replaced by the player's latest reported state when data is received.
-pos = [default_pos for _ in range(NUM_PLAYERS)]
+pos = [copy.deepcopy(default_pos) for _ in range(NUM_PLAYERS)]
 # track frozen state server-side (False == not frozen)
 frozen = [False for _ in range(NUM_PLAYERS)]
 
@@ -147,23 +198,65 @@ def threaded_client(conn, player):
     # send initial positions plus this client's index, role and round start:
     # first connected (player 0) is the seeker, all others are hidders
     role = 'seeker' if player == 0 else 'hidder'
-    # send all players' positions joined by '|' so clients can render all players
-    all_positions = "|".join([make_pos(p) for p in pos])
-    # include the receiver's player index so the client knows which entry is theirs
-    initial = all_positions + "::" + str(player) + "::" + role + "::" + str(ROUND_START_MS) + "::" + (str(WINNER_INDEX) if WINNER_INDEX is not None else 'None')
-    conn.send(str.encode(initial))
+    # send initial state as JSON so clients can parse safely
+    try:
+        initial_payload = {
+            'positions': pos,
+            'player_index': player,
+            'role': role,
+            'round_start': ROUND_START_MS,
+            'winner': WINNER_INDEX
+        }
+        conn.send(json.dumps(initial_payload).encode('utf-8'))
+    except Exception:
+        try:
+            # fallback to older CSV-style reply for compatibility
+            all_positions = "|".join([make_pos((p['x'], p['y'], p['state'], p['frame'], p['equip'], p['equip_frame'], p.get('name',''))) for p in pos])
+            initial = all_positions + "::" + str(player) + "::" + role + "::" + str(ROUND_START_MS) + "::" + (str(WINNER_INDEX) if WINNER_INDEX is not None else 'None')
+            conn.send(str.encode(initial))
+        except Exception:
+            pass
     reply = "" 
     while True:
         try:
             raw = conn.recv(2048).decode("utf-8")
-            data = read_pos(raw)
+            # try to parse JSON update from client; fall back to CSV parser
+            data = None
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and 'x' in parsed:
+                    # expected JSON update
+                    # coerce types
+                    try:
+                        parsed['x'] = int(parsed.get('x', 0))
+                    except Exception:
+                        parsed['x'] = 0
+                    try:
+                        parsed['y'] = int(parsed.get('y', 0))
+                    except Exception:
+                        parsed['y'] = 0
+                    try:
+                        parsed['frame'] = int(parsed.get('frame', 0))
+                    except Exception:
+                        parsed['frame'] = 0
+                    parsed['equip'] = parsed.get('equip', 'None')
+                    parsed['equip_frame'] = int(parsed.get('equip_frame', 0)) if parsed.get('equip_frame') is not None else 0
+                    parsed['name'] = str(parsed.get('name', '') or '')
+                    data = parsed
+            except Exception:
+                data = None
+
+            if data is None:
+                # fallback to CSV-style message
+                data = read_pos(raw)
+
             pos[player] = data
             logger.debug("data=%s", data)
             # If sender included a targeted CAUGHT event (format 'CAUGHT:<idx>')
             # and the sender is allowed to catch (we treat player 0 as seeker),
             # apply the caught state server-side so broadcasts are authoritative.
             try:
-                equip_id = data[4]
+                equip_id = data.get('equip') if isinstance(data, dict) else None
             except Exception:
                 equip_id = None
             try:
@@ -182,12 +275,13 @@ def threaded_client(conn, player):
                             logger.info("Player %s frozen by seeker %s", target_idx, player)
                             # mark the target's pos equip field to CAUGHT:<target_idx> so clients will see who was caught
                             try:
-                                tx, ty, tstate, tframe, _, teframe = pos[target_idx]
-                                pos[target_idx] = (tx, ty, tstate, tframe, f'CAUGHT:{target_idx}', teframe)
+                                # pos entries are dicts
+                                pos[target_idx]['equip'] = f'CAUGHT:{target_idx}'
                             except Exception:
                                 try:
-                                    px, py, st, fr, eid, ef = pos[target_idx]
-                                    pos[target_idx] = (px, py, st, fr, f'CAUGHT:{target_idx}', ef)
+                                    # fallback for older tuple entries
+                                    p = pos[target_idx]
+                                    pos[target_idx] = {'x': p[0], 'y': p[1], 'state': p[2], 'frame': p[3], 'equip': f'CAUGHT:{target_idx}', 'equip_frame': p[5], 'name': p[6] if len(p) >=7 else ''}
                                 except Exception:
                                     pass
                             # compute winner: if all non-seeker players frozen, record seeker as winner
@@ -204,28 +298,35 @@ def threaded_client(conn, player):
                 logger.info("Disconnected")
                 break
             else:
-                # build the authoritative positions payload for all clients
-                all_positions = "|".join([make_pos(p) for p in pos])
-                reply = all_positions
+                # build the authoritative positions payload for all clients (JSON)
+                try:
+                    broadcast = {
+                        'positions': pos,
+                        'role': role,
+                        'round_start': ROUND_START_MS,
+                        'winner': WINNER_INDEX
+                    }
+                    bstr = json.dumps(broadcast)
+                except Exception:
+                    bstr = ''
 
-                logger.debug("Received: %s", data)
-                # prepare reply augmented with role, round start and winner so clients stay in sync
-                send_payload = reply + "::" + role + "::" + str(ROUND_START_MS) + "::" + (str(WINNER_INDEX) if WINNER_INDEX is not None else 'None')
-                logger.debug("Broadcasting: %s", send_payload)
+                logger.debug("Broadcasting JSON state")
 
                 # Broadcast authoritative state to all connected clients so events
                 # like CAUGHT propagate immediately (helps multi-player consistency).
                 try:
                     for c in connections:
                         try:
-                            c.send(str.encode(send_payload))
+                            if bstr:
+                                c.send(bstr.encode('utf-8'))
                         except Exception:
                             # ignore individual send failures; connection removal handled elsewhere
                             pass
                 except Exception:
                     # fallback: send to this connection only
                     try:
-                        conn.send(str.encode(send_payload))
+                        if bstr:
+                            conn.send(bstr.encode('utf-8'))
                     except Exception:
                         pass
         except:
