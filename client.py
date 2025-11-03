@@ -442,6 +442,33 @@ class Game:
                 pass
             if resp:
                 positions_list, round_start, winner = parse_tick(resp)
+                # Quick pass: if any remote hidder emitted a WHISTLE, ensure
+                # seeker clients play positional audio immediately. This
+                # guards against cases where the main per-entry loop may not
+                # trigger playback in time.
+                try:
+                    if getattr(self.player, 'isSeeker', False):
+                        for idx, p in enumerate(positions_list):
+                            try:
+                                # p may be a tuple (legacy CSV) or dict (JSON)
+                                equip = p[4] if not isinstance(p, dict) else p.get('equip')
+                            except Exception:
+                                equip = None
+                            try:
+                                if equip == 'WHISTLE' and idx != self.state.my_index:
+                                    # extract coordinates robustly
+                                    sx = p[0] if not isinstance(p, dict) else p.get('x')
+                                    sy = p[1] if not isinstance(p, dict) else p.get('y')
+                                    try:
+                                        self._play_whistle_at((sx, sy))
+                                    except Exception:
+                                        pass
+                                    break
+                            except Exception:
+                                pass
+                        
+                except Exception:
+                    pass
                 # update server-provided round start if a valid epoch ms is provided
                 try:
                     rs = None
@@ -675,6 +702,12 @@ class Game:
                     ts_sec = int(timer_seconds)
                     if ts_sec % 25 == 0 and ts_sec != self._last_whistle_second:
                         # mark for network broadcast (next outgoing payload will carry WHISTLE)
+                        # Use game state transient flag so the outgoing builder includes WHISTLE.
+                        try:
+                            self.state.whistle_emit = True
+                        except Exception:
+                            pass
+                        # keep legacy player flag for backward compatibility (some older code paths)
                         try:
                             self.player._whistle_emit = True
                         except Exception:

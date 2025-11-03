@@ -70,11 +70,12 @@ class InputHandler:
                         g.network.send(csv, wait_for_reply=False)
                 except Exception:
                     pass
-                # clear one-shot whistle flag after immediate send
-                try:
-                    g.state.whistle_emit = False
-                except Exception:
-                    pass
+                # Do NOT clear the transient whistle flag here — leave it set
+                # so the main game loop's regular outgoing update will include
+                # the WHISTLE equip as well. Clearing it immediately can cause
+                # the manual whistle to be missed by other clients if the
+                # immediate send doesn't get processed by the server in time.
+                # The main loop will clear the flag after sending.
             except Exception:
                 pass
 
