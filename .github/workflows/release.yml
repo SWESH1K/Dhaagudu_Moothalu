@@ -1,5 +1,9 @@
 name: Build and Release Windows EXE
 
+# Required so the workflow can create/modify Releases and upload assets
+permissions:
+  contents: write
+
 on:
   # Create a GitHub Release by pushing a tag like v1.2.3
   push:
