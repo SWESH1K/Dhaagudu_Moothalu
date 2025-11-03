@@ -49,6 +49,21 @@ class Game:
             self.font = pygame.font.SysFont(None, 20)
             self.large_font = pygame.font.SysFont(None, 36)
         self.display_surface = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        # try to set the window icon from images/logos/logo_500x500.png
+        try:
+            icon_path = resource_path(os.path.join("images", "logos", "logo_500x500.png"))
+            try:
+                icon_surf = pygame.image.load(icon_path).convert_alpha()
+                pygame.display.set_icon(icon_surf)
+            except Exception:
+                # fallback: try loading without convert_alpha
+                try:
+                    icon_surf = pygame.image.load(icon_path)
+                    pygame.display.set_icon(icon_surf)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         pygame.display.set_caption("Dhaagudu Moothalu")
         self.clock = pygame.time.Clock()
         self.network = Network(server, port)
@@ -449,6 +464,12 @@ class Game:
                     self._last_whistle_time = pygame.time.get_ticks()
                 except Exception:
                     pass
+                try:
+                    self._last_whistle_volume = 0.0
+                    self._last_whistle_pan = 0.0
+                    self._last_whistle_time = pygame.time.get_ticks()
+                except Exception:
+                    pass
                 return
             # linear distance attenuation (1.0..0.0) with gentle falloff
             vol = max(0.0, 1.0 - (dist / MAX_HEAR_DIST))
@@ -537,6 +558,104 @@ class Game:
                 self._last_whistle_time = pygame.time.get_ticks()
             except Exception:
                 pass
+        except Exception:
+            pass
+
+    def draw_players_tab(self):
+        """Compact players tab styled like the controls helper (stacked small panels).
+        Each player row uses a semi-opaque panel, a colored icon box, and text to the right.
+        """
+        try:
+            entries = []
+            try:
+                local_name = getattr(self.player, 'name', None) or 'You'
+                local_role = 'Seeker' if getattr(self.player, 'isSeeker', False) else 'Hidder'
+                entries.append((local_name, local_role, True))
+            except Exception:
+                pass
+            try:
+                for idx, rp in sorted((getattr(self, 'remote_map', {}) or {}).items()):
+                    try:
+                        pname = getattr(rp, 'name', None) or f'Player{idx}'
+                        prot = 'Seeker' if getattr(rp, 'isSeeker', False) else 'Hidder'
+                        entries.append((pname, prot, False))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if not entries:
+                return
+
+            # visual constants (match controls helper)
+            padding = 8
+            icon_size = 22
+            font = self.font if getattr(self, 'font', None) else pygame.font.SysFont(None, 18)
+            row_h = max(icon_size, font.get_height()) + 8
+            total_h = row_h * len(entries)
+
+            panel_w = max(220, 8 + icon_size + 8 + 8 + max((font.size(f"[{r}] {n}")[0] for n, r, _ in entries)))
+            panel_w = min(panel_w, WINDOW_WIDTH // 4)
+
+            base_x = WINDOW_WIDTH - panel_w - 12
+            base_y = (WINDOW_HEIGHT // 2) - (total_h // 2)
+
+            for i, (name, role, is_local) in enumerate(entries):
+                y = base_y + i * row_h
+                # small semi-opaque panel similar to controls helper
+                panel_h = row_h
+                panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+                panel_surf.fill((0, 0, 0, 140))
+
+                # icon box (colored by role)
+                icon_x = padding
+                icon_y = (panel_h - icon_size) // 2
+                if role.lower().startswith('seek'):
+                    color = (60, 140, 200)
+                else:
+                    color = (220, 140, 40)
+                try:
+                    pygame.draw.rect(panel_surf, color, (icon_x, icon_y, icon_size, icon_size), border_radius=6)
+                except TypeError:
+                    pygame.draw.rect(panel_surf, color, (icon_x, icon_y, icon_size, icon_size))
+
+                # draw role initial inside icon (small)
+                try:
+                    letter = 'S' if role.lower().startswith('seek') else 'H'
+                    letter_s = font.render(letter, True, (0, 0, 0))
+                    lx = icon_x + (icon_size - letter_s.get_width()) // 2
+                    ly = icon_y + (icon_size - letter_s.get_height()) // 2
+                    panel_surf.blit(letter_s, (lx, ly))
+                except Exception:
+                    pass
+
+                # role tag and name to the right
+                try:
+                    tag_text = f"[{role.capitalize()}]"
+                    tag_s = font.render(tag_text, True, (200, 200, 200))
+                    name_s = font.render(name, True, (240, 220, 160))
+                    text_x = icon_x + icon_size + 8
+                    text_y = (panel_h - name_s.get_height()) // 2
+                    panel_surf.blit(tag_s, (text_x, text_y))
+                    panel_surf.blit(name_s, (text_x + tag_s.get_width() + 6, text_y))
+                except Exception:
+                    pass
+
+                # highlight panel for local player
+                if is_local:
+                    try:
+                        highlight = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+                        highlight.fill((255, 255, 255, 16))
+                        panel_surf.blit(highlight, (0,0))
+                    except Exception:
+                        pass
+
+                # blit row to main display
+                try:
+                    self.display_surface.blit(panel_surf, (base_x, y))
+                except Exception:
+                    pass
+
         except Exception:
             pass
 
@@ -1260,6 +1379,12 @@ class Game:
                         self.display_surface.blit(txt_surf, (text_x, text_y))
                 except Exception:
                     pass
+            except Exception:
+                pass
+
+            # Draw right-side players tab (Minecraft-style)
+            try:
+                self.draw_players_tab()
             except Exception:
                 pass
 

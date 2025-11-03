@@ -9,6 +9,7 @@ import shutil
 import importlib
 import os
 import settings as settings_mod
+from util.resource_path import resource_path
 
 
 class Menu:
@@ -24,6 +25,20 @@ class Menu:
             pass
 
         self.display_surface = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        # try to set the window icon from images/logos/logo_500x500.png
+        try:
+            icon_path = resource_path(os.path.join("images", "logos", "logo_500x500.png"))
+            try:
+                icon_surf = pygame.image.load(icon_path).convert_alpha()
+                pygame.display.set_icon(icon_surf)
+            except Exception:
+                try:
+                    icon_surf = pygame.image.load(icon_path)
+                    pygame.display.set_icon(icon_surf)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         pygame.display.set_caption("Dhaagudu Moothalu - Menu")
         try:
             self.title_font = pygame.font.SysFont('couriernew', 64)
