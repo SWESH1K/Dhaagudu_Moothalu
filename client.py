@@ -660,6 +660,54 @@ class Game:
                             if hasattr(self.player, '_equipped_id'):
                                 del self.player._equipped_id
 
+                    elif event.key == pygame.K_y:
+                        # Hidder manual whistle: broadcast a WHISTLE event so seeker(s) hear positional audio.
+                        # Only allow if game active and local player not a seeker and not frozen.
+                        if self.game_over:
+                            continue
+                        if getattr(self.player, '_frozen', False):
+                            continue
+                        # Only hidders can whistle to attract the seeker
+                        if not getattr(self.player, 'isSeeker', False):
+                            try:
+                                # mark for network broadcast (next outgoing payload will carry WHISTLE)
+                                self.player._whistle_emit = True
+                            except Exception:
+                                pass
+                            # play locally as non-positional for the hidder
+                            try:
+                                self._play_whistle_normal()
+                            except Exception:
+                                pass
+
+                            # send an immediate broadcast so seeker(s) hear the whistle without waiting for next frame
+                            try:
+                                px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
+                                try:
+                                    safe_name = (getattr(self.player, 'name', '') or '')
+                                except Exception:
+                                    safe_name = ''
+                                payload_obj = {
+                                    'x': px,
+                                    'y': py,
+                                    'state': self.player.state,
+                                    'frame': int(self.player.frame_index),
+                                    'equip': 'WHISTLE',
+                                    'equip_frame': 0,
+                                    'name': safe_name
+                                }
+                                try:
+                                    self.network.send(json.dumps(payload_obj), wait_for_reply=False)
+                                except Exception:
+                                    # fallback to CSV payload if JSON fails
+                                    payload = (px, py, self.player.state, int(self.player.frame_index), 'WHISTLE', 0, safe_name.replace(',', ''))
+                                    try:
+                                        self.network.send(self.make_pos(payload), wait_for_reply=False)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
             # Send the player's hitbox center + animation state/frame so the
             # remote client can show correct animation. We'll send a 4-part
             # payload: x,y,state,frame
@@ -1152,6 +1200,64 @@ class Game:
                         pygame.draw.rect(self.display_surface, (200, 200, 200), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2), 1)
                         fill_w = int(vol * bar_w)
                         pygame.draw.rect(self.display_surface, (100, 220, 100), (bar_x, bar_y, fill_w, bar_h))
+                except Exception:
+                    pass
+
+                # Controls helper: show controller-button style hints in bottom-left
+                try:
+                    # entries ordered top-to-bottom to match reference image
+                    # X label is conditional: 'Check' for seeker, 'Transform' for hidder
+                    x_label = 'Check' if getattr(self, 'player', None) and getattr(self.player, 'isSeeker', False) else 'Transform'
+                    # Y = Whistle for hidders, Inventory for seeker (keep previous behaviour for seeker)
+                    try:
+                        if getattr(self.player, 'isSeeker', False):
+                            y_label = 'Inventory'
+                        else:
+                            y_label = 'Whistle'
+                    except Exception:
+                        y_label = 'Inventory'
+                    entries = [
+                        ('Y', (220, 180, 40), y_label),
+                        ('X', (60, 140, 220), x_label),
+                    ]
+                    padding = 8
+                    icon_size = 22
+                    font_h = self.font.get_height()
+                    row_h = max(icon_size, font_h) + 8
+                    # compute base y so the whole stack sits above bottom margin
+                    total_h = row_h * len(entries)
+                    base_x = 12
+                    base_y = WINDOW_HEIGHT - 12 - total_h
+                    for i, (label_char, color, label_text) in enumerate(entries):
+                        y = base_y + i * row_h
+                        # render label text
+                        txt_surf = self.font.render(label_text, True, (255, 255, 255))
+                        panel_w = icon_size + 8 + txt_surf.get_width() + padding * 2
+                        panel_h = row_h
+                        # semi-opaque background panel for readability
+                        panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
+                        panel_surf.fill((0, 0, 0, 140))
+                        self.display_surface.blit(panel_surf, (base_x, y))
+
+                        # icon box (rounded)
+                        icon_x = base_x + padding
+                        icon_y = y + (panel_h - icon_size) // 2
+                        try:
+                            pygame.draw.rect(self.display_surface, color, (icon_x, icon_y, icon_size, icon_size), border_radius=6)
+                        except TypeError:
+                            # older pygame may not support border_radius argument for draw.rect on some platforms
+                            pygame.draw.rect(self.display_surface, color, (icon_x, icon_y, icon_size, icon_size))
+
+                        # draw the letter centered in the icon
+                        letter_s = self.font.render(label_char, True, (0, 0, 0))
+                        lx = icon_x + (icon_size - letter_s.get_width()) // 2
+                        ly = icon_y + (icon_size - letter_s.get_height()) // 2
+                        self.display_surface.blit(letter_s, (lx, ly))
+
+                        # draw the descriptive text to the right of the icon
+                        text_x = icon_x + icon_size + 8
+                        text_y = y + (panel_h - txt_surf.get_height()) // 2
+                        self.display_surface.blit(txt_surf, (text_x, text_y))
                 except Exception:
                     pass
             except Exception:
