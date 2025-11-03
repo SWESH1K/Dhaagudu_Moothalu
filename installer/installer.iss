@@ -20,9 +20,11 @@ Source: "{#SrcExe}"; DestDir: "{app}"; Flags: ignoreversion
 
 ; Optional: you can include separate data folders if you did not bundle them into the exe
 ; Uncomment and adjust the lines below if you prefer shipping assets separately
-; Source: "{#ProjectDir}\data\*"; DestDir: "{app}\data"; Flags: recursesubdirs createallsubdirs
-; Source: "{#ProjectDir}\images\*"; DestDir: "{app}\images"; Flags: recursesubdirs createallsubdirs
-; Source: "{#ProjectDir}\sounds\*"; DestDir: "{app}\sounds"; Flags: recursesubdirs createallsubdirs
+; Optional: you can include separate data folders if you did not bundle them into the exe
+; Include the game data and media so the installer will copy TMX/tileset images and sounds
+Source: "{#ProjectDir}\data\*"; DestDir: "{app}\data"; Flags: recursesubdirs createallsubdirs
+Source: "{#ProjectDir}\images\*"; DestDir: "{app}\images"; Flags: recursesubdirs createallsubdirs
+Source: "{#ProjectDir}\sounds\*"; DestDir: "{app}\sounds"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\Dhaagudu Moothalu"; Filename: "{app}\DhaaguduMoothalu.exe"

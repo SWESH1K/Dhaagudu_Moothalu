@@ -79,7 +79,9 @@ class Menu:
         # Load tiled map and render a window-sized view centered on the map,
         # then create a blurred version by downscaling and upscaling.
         try:
-            tmx = load_pygame(join('data', 'maps', 'world.tmx'))
+            # Use resource_path so the TMX (and its tileset images) are found
+            # both in development and when running from a bundled executable.
+            tmx = load_pygame(resource_path(join('data', 'maps', 'world.tmx')))
         except Exception:
             self.bg_surface = None
             return
