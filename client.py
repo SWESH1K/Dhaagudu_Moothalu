@@ -218,8 +218,11 @@ class Game:
                         if widx == self.my_index:
                             self.winner_text = "You win!"
                         else:
-                            # If winner is seeker (0) we show Seeker wins
-                            self.winner_text = "Seeker wins!"
+                            # Distinguish seeker vs hidder wins
+                            if widx == 0:
+                                self.winner_text = "Seeker wins!"
+                            else:
+                                self.winner_text = "Hidder wins!"
                         # stop the round timer at this moment
                         self.round_stopped = True
                         self.round_stop_ms = int(time.time() * 1000)
@@ -1041,8 +1044,11 @@ class Game:
                                 if widx == self.my_index:
                                     self.winner_text = "You win!"
                                 else:
-                                    # assume seeker wins otherwise
-                                    self.winner_text = "Seeker wins!"
+                                    # Distinguish seeker vs hidder wins
+                                    if widx == 0:
+                                        self.winner_text = "Seeker wins!"
+                                    else:
+                                        self.winner_text = "Hidder wins!"
                                 self.round_stopped = True
                                 self.round_stop_ms = int(time.time() * 1000)
                         except Exception:
@@ -1329,13 +1335,35 @@ class Game:
                         joined = 1
                     text = f"Waiting for other players — {joined}/{NUM_PLAYERS}"
                 else:
-                    ts = timer_seconds
-                    sign = '-' if ts < 0 else ''
-                    secs = int(abs(ts))
+                    # timer_seconds is elapsed seconds since the round base (may be negative before hide end)
+                    elapsed = float(timer_seconds)
+                    # Configuration
+                    HIDE_SECONDS = 30
+                    PER_HIDDER_SECONDS = 45
+                    total_hidders = max(0, NUM_PLAYERS - 1)
+                    total_hunt_seconds = PER_HIDDER_SECONDS * total_hidders
+
+                    if elapsed < 0:
+                        # Before the hide phase ends: round_base is in the future.
+                        # Remaining hide time is -elapsed (seconds until hide end).
+                        remaining = max(0.0, -elapsed)
+                        phase_label = "Hidders hide"
+                    else:
+                        # After hide end: elapsed counts time since hide finished.
+                        hunt_elapsed = elapsed
+                        remaining = max(0.0, total_hunt_seconds - hunt_elapsed)
+                        phase_label = "Seeker hunting"
+
+                    # Show countdown as MM:SS; use ceil so UI shows full last second
+                    try:
+                        import math as _math
+                        secs = int(_math.ceil(remaining))
+                    except Exception:
+                        secs = int(max(0, remaining))
                     mins = secs // 60
                     secs_rem = secs % 60
-                    timer_text = f"{sign}{mins:02d}:{secs_rem:02d}"
-                    text = f"{timer_text}"
+                    timer_text = f"{mins:02d}:{secs_rem:02d}"
+                    text = f"{phase_label} — {timer_text}"
 
                 # render large text surface
                 txt_surf = self.large_font.render(text, True, (255, 255, 255))

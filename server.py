@@ -368,6 +368,83 @@ def threaded_client(conn, player):
     logger.info("Lost connection")
     conn.close()
 
+
+def _round_manager():
+    """Background manager that enforces the hide/seek timing rules.
+
+    Behavior:
+    - Wait until ROUND_START_MS (initial 30s hide phase already encoded into the timestamp)
+    - For each hidder (players 1..N-1) give the seeker 45 seconds to catch that hidder.
+      If the hidder is not caught within 45s, that hidder becomes the winner and the round ends.
+    - If the seeker catches all hidders within their allotted windows, the seeker wins.
+    """
+    global WINNER_INDEX, ROUND_START_MS
+    try:
+        # wait until the round start time (ROUND_START_MS is epoch ms)
+        if ROUND_START_MS is None:
+            return
+        wait_ms = ROUND_START_MS - int(time.time() * 1000)
+        if wait_ms > 0:
+            time.sleep(wait_ms / 1000.0)
+
+        # now the hide phase has ended; enforce 45s per hidder
+        hidders = [i for i in range(NUM_PLAYERS) if i != 0]
+        for hid in hidders:
+            # if there's already a winner set externally, stop
+            if WINNER_INDEX is not None:
+                break
+            # if this hidder is already frozen, treat as already caught
+            if frozen[hid]:
+                logger.info("Hidder %s already frozen at start of their window, skipping", hid)
+                continue
+
+            logger.info("Starting 45s catch window for hidder %s", hid)
+            start = time.time()
+            timed_out = True
+            while time.time() - start < 45:
+                # if this hidder got frozen during the window, move to next
+                if frozen[hid]:
+                    timed_out = False
+                    logger.info("Hidder %s was caught within 45s", hid)
+                    break
+                # if another part of server set a winner, stop
+                if WINNER_INDEX is not None:
+                    timed_out = False
+                    break
+                time.sleep(0.25)
+
+            if timed_out:
+                # seeker failed to catch this hidder in 45s -> hidder wins
+                WINNER_INDEX = hid
+                logger.info("Hidder %s wins: not caught within 45s", hid)
+                break
+
+        # if we iterated through all hidders and no winner yet, seeker wins
+        if WINNER_INDEX is None:
+            WINNER_INDEX = 0
+            logger.info("Seeker wins: all hidders caught within allotted time")
+
+        # broadcast final state so clients update immediately
+        try:
+            broadcast = {
+                'positions': pos,
+                'round_start': ROUND_START_MS,
+                'winner': WINNER_INDEX
+            }
+            bstr = json.dumps(broadcast)
+            try:
+                for c in connections:
+                    try:
+                        c.send(bstr.encode('utf-8'))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        logger.exception('Round manager failed')
+
 currentPlayer = 0
 while True:
     conn, addr = s.accept()
@@ -382,6 +459,19 @@ while True:
     # recent connection filled the expected slots.
     if currentPlayer == (NUM_PLAYERS - 1):
         ROUND_START_MS = int(time.time() * 1000) + 30000
+        # reset round state
+        WINNER_INDEX = None
+        try:
+            for i in range(len(frozen)):
+                frozen[i] = False
+        except Exception:
+            pass
+        # start the round manager thread that will enforce per-hidder timers
+        try:
+            t = threading.Thread(target=_round_manager, daemon=True)
+            t.start()
+        except Exception:
+            pass
     logger.info(f"All {NUM_PLAYERS} players connected — starting round at {ROUND_START_MS}")
 
     start_new_thread(threaded_client, (conn, currentPlayer))
