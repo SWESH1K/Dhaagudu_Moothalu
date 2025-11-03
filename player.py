@@ -34,6 +34,28 @@ class Player(pygame.sprite.Sprite):
 
         # Movement setup
         self.direction = pygame.math.Vector2()
+        # track last received remote position so we can infer movement for
+        # remote players (used to drive animation when network frames are sparse)
+        try:
+            self._last_remote_pos = (int(pos[0]), int(pos[1]))
+        except Exception:
+            self._last_remote_pos = None
+        # timestamp (ms) until which we should consider a remote player as moving
+        # even if positional deltas are infrequent. This helps animations keep
+        # running smoothly between network updates.
+        try:
+            self._remote_moving_until = 0
+        except Exception:
+            self._remote_moving_until = 0
+        # track last received frame from network so we don't overwrite the
+        # locally-advancing frame_index on every update (which would freeze
+        # animation if the server repeatedly sends 0).
+        try:
+            self._last_received_frame = None
+            self._last_received_ts = 0
+        except Exception:
+            self._last_received_frame = None
+            self._last_received_ts = 0
         self.speed = 500
         self.collision_sprites = collision_sprites
         # Whether this player is controlled locally (reads keyboard). Remote players
@@ -151,8 +173,22 @@ class Player(pygame.sprite.Sprite):
         elif self.direction.y != 0:
             self.state = 'down' if self.direction.y > 0 else 'up'
 
-        # Animate only when moving
-        if self.direction.magnitude() > 0:
+        # Animate when moving. For remote players we may also have set a
+        # short-lived _remote_moving_until timer (ms) to keep animation
+        # running between network updates — treat that as movement as well.
+        moving = False
+        try:
+            if self.direction.magnitude() > 0:
+                moving = True
+            else:
+                try:
+                    moving = (getattr(self, '_remote_moving_until', 0) > pygame.time.get_ticks())
+                except Exception:
+                    moving = False
+        except Exception:
+            moving = False
+
+        if moving:
             self.frame_index += 5 * dt  # animation speed
             if self.frame_index >= len(self.frames[self.state]):
                 self.frame_index = 0  # loop animation
@@ -206,10 +242,7 @@ class Player(pygame.sprite.Sprite):
                             try:
                                 if newch:
                                     newch.play(self._walk_sound, loops=-1)
-                                    try:
-                                        newch.set_volume(0.6 * float(VOLUME))
-                                    except Exception:
-                                        newch.set_volume(0.6)
+                                    newch.set_volume(0.6)
                                     self._walk_channel = newch
                                 else:
                                     # fallback to Sound.play (may use shared channels)
@@ -237,6 +270,13 @@ class Player(pygame.sprite.Sprite):
             # For remote players we expect position to be set from network.
             # Ensure rect stays in sync with hitbox if network updates the hitbox.
             try:
+                # Advance remote animation so walking frames are visible on
+                # other clients. animate() inspects self.direction (which is
+                # set by set_remote_state) to determine whether to animate.
+                try:
+                    self.animate(dt)
+                except Exception:
+                    pass
                 self.rect.center = self.hitbox.center
             except Exception:
                 # Fall back to rect center if hitbox not set
@@ -394,8 +434,85 @@ class Player(pygame.sprite.Sprite):
         except Exception:
             pass
 
-        # Clamp frame index and set image immediately so remote animation is visible
+        # Clamp frame index and set image, but avoid overwriting a
+        # locally-advancing frame_index on every network update. Only set
+        # the frame_index if the incoming frame differs from the last
+        # received frame — otherwise let animate() advance frames locally.
         frames_list = self.frames.get(self.state)
+        try:
+            now = pygame.time.get_ticks()
+        except Exception:
+            now = 0
+
         if frames_list:
-            self.frame_index = use_frame % len(frames_list)
-            self.image = frames_list[int(self.frame_index) % len(frames_list)]
+            # if this is a new incoming frame (or we've never received one)
+            if self._last_received_frame is None or int(use_frame) != int(self._last_received_frame):
+                self.frame_index = int(use_frame) % len(frames_list)
+            # always update the visible image to the current frame_index
+            try:
+                self.image = frames_list[int(self.frame_index) % len(frames_list)]
+            except Exception:
+                pass
+            # remember last received frame/time
+            try:
+                self._last_received_frame = int(use_frame)
+                self._last_received_ts = now
+            except Exception:
+                pass
+
+    # Infer remote movement from positional delta (more reliable than
+    # relying on the integer frame value sent over the network). If the
+    # remote moved since the last update set direction so animate() will
+    # advance frames locally until the next network update.
+        try:
+            prev = getattr(self, '_last_remote_pos', None)
+            if prev is not None:
+                dx = int(pos[0]) - int(prev[0])
+                dy = int(pos[1]) - int(prev[1])
+                # small threshold to avoid jitter from minor network noise
+                if abs(dx) + abs(dy) > 2:
+                    if abs(dx) > abs(dy):
+                        # horizontal
+                        if dx > 0:
+                            self.direction.x, self.direction.y = 1, 0
+                        else:
+                            self.direction.x, self.direction.y = -1, 0
+                    else:
+                        # vertical
+                        if dy > 0:
+                            self.direction.x, self.direction.y = 0, 1
+                        else:
+                            self.direction.x, self.direction.y = 0, -1
+                else:
+                    # No significant delta — fall back to frame-based hint
+                    # from the sender: if their frame index > 0 treat them as
+                    # moving in the reported state so animation still advances.
+                    try:
+                        if fi > 0:
+                            if self.state == 'left':
+                                self.direction.x, self.direction.y = -1, 0
+                            elif self.state == 'right':
+                                self.direction.x, self.direction.y = 1, 0
+                            elif self.state == 'up':
+                                self.direction.x, self.direction.y = 0, -1
+                            else:
+                                self.direction.x, self.direction.y = 0, 1
+                        else:
+                            self.direction.x, self.direction.y = 0, 0
+                    except Exception:
+                        self.direction.x, self.direction.y = 0, 0
+            # store latest for next comparison
+            self._last_remote_pos = (int(pos[0]), int(pos[1]))
+            # If movement was detected or sender indicates a non-zero frame,
+            # keep the remote flagged as moving for a short time so animate()
+            # continues advancing between network updates.
+            try:
+                if (abs(dx) + abs(dy) > 2) or fi > 0:
+                    self._remote_moving_until = pygame.time.get_ticks() + 300
+            except Exception:
+                pass
+        except Exception:
+            try:
+                self.direction.x, self.direction.y = 0, 0
+            except Exception:
+                pass
