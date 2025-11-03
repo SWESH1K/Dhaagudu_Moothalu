@@ -102,7 +102,8 @@ class Game:
                         except Exception:
                             equip_frame = 0
                         name = p.get('name')
-                        positions.append((x, y, state, frame, equip, equip_frame, name))
+                        occupied = p.get('occupied', True)
+                        positions.append((x, y, state, frame, equip, equip_frame, name, occupied))
                     player_index = j.get('player_index')
                     role = j.get('role')
                     round_start = j.get('round_start')
@@ -199,7 +200,12 @@ class Game:
                 # fallback to a sensible default if parsing failed
                 self.start_pos = (500, 300)
             self.role = role
-            self.server_round_base = round_start
+            # Coerce server-provided round_start to an integer epoch ms if valid; else None
+            try:
+                rs = int(round_start)
+                self.server_round_base = rs if rs > 0 else None
+            except Exception:
+                self.server_round_base = None
             # If server declared a winner, apply it immediately
             try:
                 if winner is not None:
@@ -233,7 +239,8 @@ class Game:
                 try:
                     if sp[7] is not None:
                         try:
-                            self.server_round_base = int(sp[7])
+                            _rs_tmp = int(sp[7])
+                            self.server_round_base = _rs_tmp if _rs_tmp > 0 else None
                         except Exception:
                             self.server_round_base = None
                     else:
@@ -250,7 +257,8 @@ class Game:
         try:
             if sp[7] is not None:
                 try:
-                    self.server_round_base = int(sp[7])
+                    _rs_tmp = int(sp[7])
+                    self.server_round_base = _rs_tmp if _rs_tmp > 0 else None
                 except Exception:
                     self.server_round_base = None
             else:
@@ -274,6 +282,14 @@ class Game:
             if positions_list and my_index is not None:
                         for idx, p in enumerate(positions_list):
                             if idx == my_index:
+                                continue
+                            # support optional 'occupied' flag appended as last element
+                            try:
+                                occupied = p[7] if len(p) >= 8 else True
+                            except Exception:
+                                occupied = True
+                            if not occupied:
+                                # slot unoccupied; don't create a remote player yet
                                 continue
                             px, py = p[0], p[1]
                             is_seeker = (idx == 0)
@@ -929,7 +945,8 @@ class Game:
                                         name = name.split('::')[0].strip()
                                     except Exception:
                                         name = name.strip()
-                                positions.append((x, y, state, frame, equip, equip_frame, name))
+                                occupied = p.get('occupied', True)
+                                positions.append((x, y, state, frame, equip, equip_frame, name, occupied))
                             round_start = j.get('round_start')
                             winner = j.get('winner')
                             return (positions, round_start, winner)
@@ -989,17 +1006,26 @@ class Game:
                                         name = name.split('::')[0].strip()
                                     except Exception:
                                         name = name.strip()
-                                positions.append((x, y, state, frame, equip_id, equip_frame, name))
+                                # older CSV-style responses don't include occupied flag;
+                                # assume occupied for backward compatibility
+                                positions.append((x, y, state, frame, equip_id, equip_frame, name, True))
                     except Exception:
                         positions = []
 
                     return (positions, round_start, winner)
 
                 positions_list, round_start, winner = _parse_resp(resp)
-                # update server-provided round start if present so timers stay synced
+                # update server-provided round start if a valid epoch ms is provided
                 try:
-                    if round_start is not None:
-                        self.server_round_base = int(round_start)
+                    rs = None
+                    try:
+                        rs_candidate = int(round_start)
+                        if rs_candidate > 0:
+                            rs = rs_candidate
+                    except Exception:
+                        rs = None
+                    if rs is not None:
+                        self.server_round_base = rs
                         self.round_base = self.server_round_base
                 except Exception:
                     pass
@@ -1024,26 +1050,63 @@ class Game:
                 except Exception:
                     pass
 
-                # Apply updates for every player entry we received
+                    # Apply updates for every player entry we received
                 try:
                     # keep track of frozen hidders for win-condition
                     frozen_count = 0
                     total_hidders = max(0, NUM_PLAYERS - 1)
                     for idx, p in enumerate(positions_list):
-                        # support both 6-field and 7-field tuples
+                        # robustly extract fields and optional occupied flag
                         try:
-                            x, y, state, frame, equip_id, equip_frame, pname = p
-                        except Exception:
-                            try:
+                            if len(p) >= 8:
+                                x, y, state, frame, equip_id, equip_frame, pname, occupied = p
+                            elif len(p) == 7:
+                                x, y, state, frame, equip_id, equip_frame, pname = p
+                                occupied = True
+                            elif len(p) == 6:
                                 x, y, state, frame, equip_id, equip_frame = p
                                 pname = None
-                            except Exception:
+                                occupied = True
+                            else:
                                 continue
-                        # If this entry is the local player, update nothing (local authoritative)
-                        # else apply to corresponding remote player
-                        if hasattr(self, 'server_round_base') and self.server_round_base is None:
-                            pass
-                        # Update remote players
+                        except Exception:
+                            continue
+
+                        # If this entry is the local player, skip applying remote updates
+                        if idx == self.my_index:
+                            continue
+
+                        # If slot is not occupied, remove any existing remote player
+                        if not occupied:
+                            try:
+                                if hasattr(self, 'remote_map') and idx in self.remote_map:
+                                    try:
+                                        self.remote_map[idx].kill()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        del self.remote_map[idx]
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            # nothing else to do for this slot
+                            continue
+
+                        # Ensure a remote player exists for occupied slots
+                        if not hasattr(self, 'remote_map'):
+                            self.remote_map = {}
+                        if idx not in self.remote_map:
+                            try:
+                                is_seeker = (idx == 0)
+                                remote = Player((x, y), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
+                                if pname:
+                                    remote.name = pname
+                                self.remote_map[idx] = remote
+                            except Exception:
+                                pass
+
+                        # Update remote player state
                         if hasattr(self, 'remote_map') and idx in self.remote_map:
                             rp = self.remote_map[idx]
                             try:
@@ -1136,7 +1199,8 @@ class Game:
 
             # update round timer and movement permission (use epoch ms from server)
             now_ms = int(time.time() * 1000)
-            if self.round_base is None:
+            # Treat any non-numeric or non-positive base as 'not started yet'
+            if not isinstance(self.round_base, (int, float)) or self.round_base <= 0:
                 timer_seconds = None
             else:
                 if getattr(self, 'round_stopped', False) and self.round_stop_ms is not None:
@@ -1258,7 +1322,12 @@ class Game:
             try:
                 # If timer_seconds is None, the server hasn't started the round yet
                 if timer_seconds is None:
-                    text = "Waiting for player..."
+                    # show number of players joined / expected (include local player)
+                    try:
+                        joined = 1 + len(getattr(self, 'remote_map', {}))
+                    except Exception:
+                        joined = 1
+                    text = f"Waiting for other players — {joined}/{NUM_PLAYERS}"
                 else:
                     ts = timer_seconds
                     sign = '-' if ts < 0 else ''

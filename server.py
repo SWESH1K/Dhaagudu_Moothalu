@@ -179,16 +179,30 @@ def make_pos(tup):
 s.listen(NUM_PLAYERS)
 logger.info(f"Waiting for connections (expecting {NUM_PLAYERS})... Server Started")
 
-# Server round start timestamp (epoch ms). Start at now - 30s so clients see -00:30 initially.
+# Server round start timestamp (epoch ms). None until all players connect.
+# Use a real JSON null for clients instead of the string 'None'.
 ROUND_START_MS = None
 
 # authoritative winner index when round ends (None when ongoing)
 WINNER_INDEX = None
 
 # default pos now represented as a dict (JSON-friendly)
-default_pos = {'x': 1272, 'y': 2018, 'state': 'down', 'frame': 0, 'equip': 'None', 'equip_frame': 0, 'name': 'Player'}
+# Default position template for an empty slot. 'occupied' marks whether a
+# client has actually claimed this player index. Initially False so clients
+# can render empty slots (or nothing) until a real player joins.
+default_pos = {
+    'x': 1272,
+    'y': 2018,
+    'state': 'down',
+    'frame': 0,
+    'equip': 'None',
+    'equip_frame': 0,
+    'name': '',
+    'occupied': False,
+}
 # create a list of default positions sized to NUM_PLAYERS. Each entry will be
-# replaced by the player's latest reported state when data is received.
+# replaced by the player's latest reported state (and marked occupied) when
+# data is received from a connected client.
 pos = [copy.deepcopy(default_pos) for _ in range(NUM_PLAYERS)]
 # track frozen state server-side (False == not frozen)
 frozen = [False for _ in range(NUM_PLAYERS)]
@@ -250,7 +264,26 @@ def threaded_client(conn, player):
                 # fallback to CSV-style message
                 data = read_pos(raw)
 
-            pos[player] = data
+            # store incoming data and mark this slot occupied
+            try:
+                # ensure we preserve keys and set occupied flag
+                if isinstance(data, dict):
+                    data['occupied'] = True
+                    pos[player] = data
+                else:
+                    # fallback for older CSV-style payloads: convert to dict
+                    p = data
+                    new = {'x': p.get('x', 0) if isinstance(p, dict) else p[0],
+                           'y': p.get('y', 0) if isinstance(p, dict) else p[1],
+                           'state': p.get('state', 'down') if isinstance(p, dict) else (p[2] if len(p) > 2 else 'down'),
+                           'frame': int(p.get('frame', 0)) if isinstance(p, dict) else (int(p[3]) if len(p) > 3 else 0),
+                           'equip': p.get('equip', 'None') if isinstance(p, dict) else (p[4] if len(p) > 4 else 'None'),
+                           'equip_frame': int(p.get('equip_frame', 0)) if isinstance(p, dict) else (int(p[5]) if len(p) > 5 else 0),
+                           'name': p.get('name','') if isinstance(p, dict) else (p[6] if len(p) > 6 else ''),
+                           'occupied': True}
+                    pos[player] = new
+            except Exception:
+                pos[player] = data
             logger.debug("data=%s", data)
             # If sender included a targeted CAUGHT event (format 'CAUGHT:<idx>')
             # and the sender is allowed to catch (we treat player 0 as seeker),
