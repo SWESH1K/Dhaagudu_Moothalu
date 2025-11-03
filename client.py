@@ -3,14 +3,22 @@ import sys
 import time
 import math
 import json
-from network import Network
 from settings import *
 from player import Player
 from sprites import *
 from pytmx.util_pygame import load_pygame
 import os
-from util.resource_path import resource_path
+from util.resource_path import resource_path, ResourceLocator
 import sys as _sys_for_server
+from core.contracts import INetworkClient
+from services.networking import TcpNetworkClient
+from services.audio import PygameAudioService
+from services.timer import RoundTimer
+from renderers.hud import HUDRenderer
+from renderers.world import WorldRenderer
+from net.sync import parse_initial, parse_tick, build_outgoing_strings
+from core.contracts import GameState
+from controllers.input import InputHandler
 
 # When the frozen executable is invoked with --run-server, run the bundled server
 # code in this process. This allows the client to spawn a server subprocess that
@@ -66,146 +74,38 @@ class Game:
             pass
         pygame.display.set_caption("Dhaagudu Moothalu")
         self.clock = pygame.time.Clock()
-        self.network = Network(server, port)
+        # Services (DIP)
+        self.resource_locator = ResourceLocator()
+        self.audio = PygameAudioService()
+        self.timer = RoundTimer()
+        self.network = TcpNetworkClient(server, port)
         self.running = True
-        # The server now sends all players' positions joined by '|' and appends
-        # metadata separated by '::'. The initial reply also includes this
-        # client's player index so we can map which entry is local.
-        initial_resp = self.network.getPos()
-        # parse initial response into positions list and metadata
-        def _parse_server_resp(resp):
-            # returns (positions_list, player_index_or_None, role_or_None, round_start_or_None, winner_index_or_None)
-            if resp is None:
-                return ([], None, None, None, None)
-            # if server sent JSON, parse it directly
-            try:
-                j = json.loads(resp)
-                if isinstance(j, dict) and 'positions' in j:
-                    positions = []
-                    for p in j.get('positions', []):
-                        try:
-                            x = int(p.get('x', 0))
-                        except Exception:
-                            x = 0
-                        try:
-                            y = int(p.get('y', 0))
-                        except Exception:
-                            y = 0
-                        state = p.get('state', 'down')
-                        try:
-                            frame = int(p.get('frame', 0))
-                        except Exception:
-                            frame = 0
-                        equip = p.get('equip', 'None')
-                        try:
-                            equip_frame = int(p.get('equip_frame', 0))
-                        except Exception:
-                            equip_frame = 0
-                        name = p.get('name')
-                        occupied = p.get('occupied', True)
-                        positions.append((x, y, state, frame, equip, equip_frame, name, occupied))
-                    player_index = j.get('player_index')
-                    role = j.get('role')
-                    round_start = j.get('round_start')
-                    winner = j.get('winner')
-                    return (positions, player_index, role, round_start, winner)
-            except Exception:
-                pass
-            # Server appends trailing metadata separated by '::'. Use rsplit to
-            # safely extract trailing fields and avoid accidental inclusion in names.
-            try:
-                parts = resp.rsplit('::', 4)
-            except Exception:
-                parts = [resp]
-
-            player_index = None
-            role = None
-            round_start = None
-            winner = None
-
-            if len(parts) == 5:
-                all_positions_str, player_idx_s, role_s, round_s, winner_s = parts
-                try:
-                    player_index = int(player_idx_s)
-                except Exception:
-                    player_index = None
-                role = role_s if role_s != 'None' else None
-                try:
-                    round_start = int(round_s)
-                except Exception:
-                    round_start = None
-                winner = winner_s if winner_s != 'None' else None
-            elif len(parts) == 4:
-                # Non-initial reply: no player index
-                all_positions_str, role_s, round_s, winner_s = parts
-                role = role_s if role_s != 'None' else None
-                try:
-                    round_start = int(round_s)
-                except Exception:
-                    round_start = None
-                winner = winner_s if winner_s != 'None' else None
-            else:
-                all_positions_str = parts[0]
-
-            positions = []
-            try:
-                if all_positions_str:
-                    # each position encoded as comma-separated fields; multiple entries separated by '|'
-                    entries = all_positions_str.split('|')
-                    for e in entries:
-                        if not e:
-                            continue
-                        parts_c = e.split(',')
-                        try:
-                            x = int(parts_c[0]); y = int(parts_c[1])
-                        except Exception:
-                            continue
-                        state = parts_c[2] if len(parts_c) >= 3 else 'down'
-                        try:
-                            frame = int(parts_c[3]) if len(parts_c) >= 4 else 0
-                        except Exception:
-                            frame = 0
-                        equip_id = parts_c[4] if len(parts_c) >= 5 else 'None'
-                        try:
-                            equip_frame = int(parts_c[5]) if len(parts_c) >= 6 else 0
-                        except Exception:
-                            equip_frame = 0
-                        # optional name field
-                        name = parts_c[6] if len(parts_c) >= 7 else None
-                        # strip any stray metadata markers from name
-                        if isinstance(name, str):
-                            try:
-                                name = name.split('::')[0].strip()
-                            except Exception:
-                                name = name.strip()
-                        positions.append((x, y, state, frame, equip_id, equip_frame, name))
-            except Exception:
-                positions = []
-
-            return (positions, player_index, role, round_start, winner)
-
-        positions_list, my_index, role, round_start, winner = _parse_server_resp(initial_resp)
-        # store our player index for later incoming updates
-        self.my_index = my_index if my_index is not None else 0
+        # The server now sends all players' positions and metadata.
+        # Parse the initial response using the sync helper.
+        initial_resp = self.network.get_initial()
+        positions_list, my_index, role, round_start, winner = parse_initial(initial_resp)
+        # Initialize shared game state model with our player index
+        idx = my_index if my_index is not None else 0
+        self.state = GameState(my_index=idx)
+        # Keep legacy attribute for backward-compat, but prefer self.state.my_index
+        self.my_index = idx
 
         # If server didn't send positions list, fall back to previous read_pos behavior
         if positions_list:
-            # determine this client's start_pos using self.my_index if provided
-            if self.my_index is None:
-                self.my_index = 0
+            # determine this client's start_pos using state.my_index
+            sidx = self.state.my_index if getattr(self, 'state', None) else 0
             try:
-                sp = positions_list[self.my_index]
+                sp = positions_list[sidx]
                 self.start_pos = (sp[0], sp[1])
             except Exception:
                 # fallback to a sensible default if parsing failed
                 self.start_pos = (500, 300)
             self.role = role
-            # Coerce server-provided round_start to an integer epoch ms if valid; else None
+            # Initialize timer from server-provided round_start (epoch ms)
             try:
-                rs = int(round_start)
-                self.server_round_base = rs if rs > 0 else None
+                self.timer.set_round_base(int(round_start) if round_start is not None else None)
             except Exception:
-                self.server_round_base = None
+                self.timer.set_round_base(None)
             # If server declared a winner, apply it immediately
             try:
                 if winner is not None:
@@ -215,7 +115,7 @@ class Game:
                         # if winner is this client or someone else, set game_over and show text
                         self.game_over = True
                         self.game_over_start = pygame.time.get_ticks()
-                        if widx == self.my_index:
+                        if widx == self.state.my_index:
                             self.winner_text = "You win!"
                         else:
                             # Distinguish seeker vs hidder wins
@@ -224,8 +124,16 @@ class Game:
                             else:
                                 self.winner_text = "Hidder wins!"
                         # stop the round timer at this moment
-                        self.round_stopped = True
-                        self.round_stop_ms = int(time.time() * 1000)
+                        try:
+                            self.timer.stop()
+                        except Exception:
+                            pass
+                        # mirror into state
+                        try:
+                            self.state.game_over = True
+                            self.state.winner_text = self.winner_text
+                        except Exception:
+                            pass
                     except Exception:
                         pass
             except Exception:
@@ -254,20 +162,20 @@ class Game:
                 # ultimate fallback
                 self.start_pos = (500, 300)
                 self.role = None
-                self.server_round_base = None
+                self.timer.set_round_base(None)
 
         # server-provided round start (epoch ms). If missing, keep as None so we can show waiting state
         try:
             if sp[7] is not None:
                 try:
                     _rs_tmp = int(sp[7])
-                    self.server_round_base = _rs_tmp if _rs_tmp > 0 else None
+                    self.timer.set_round_base(_rs_tmp if _rs_tmp > 0 else None)
                 except Exception:
-                    self.server_round_base = None
+                    self.timer.set_round_base(None)
             else:
-                self.server_round_base = None
+                self.timer.set_round_base(None)
         except Exception:
-            self.server_round_base = None
+            self.timer.set_round_base(None)
 
 
         # Sprite Groups
@@ -276,15 +184,22 @@ class Game:
 
         # Create local Player and remote Player instances for every other participant.
         is_local_seeker = (self.role == 'seeker')
-        self.player = Player(self.start_pos, self.all_sprites, self.collision_sprites, controlled=True, isSeeker=is_local_seeker)
+        try:
+            from player import Seeker, Hidder
+            self.player = (Seeker if is_local_seeker else Hidder)(self.start_pos, self.all_sprites, self.collision_sprites, controlled=True, name=None)
+        except Exception:
+            # fallback to base Player
+            from player import Player as _BasePlayer
+            self.player = _BasePlayer(self.start_pos, self.all_sprites, self.collision_sprites, controlled=True, isSeeker=is_local_seeker)
 
-        # Build remote players mapping: index -> Player instance
+    # Build remote players mapping: index -> Player instance
         self.remote_map = {}
         try:
             # If we parsed positions_list above and my_index exists, create remotes
-            if positions_list and my_index is not None:
+            if positions_list:
+                        sidx = self.state.my_index if getattr(self, 'state', None) else None
                         for idx, p in enumerate(positions_list):
-                            if idx == my_index:
+                            if sidx is not None and idx == sidx:
                                 continue
                             # support optional 'occupied' flag appended as last element
                             try:
@@ -301,7 +216,11 @@ class Game:
                                 pname = p[6] if len(p) >= 7 else None
                             except Exception:
                                 pname = None
-                            remote = Player((px, py), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
+                            try:
+                                from player import Seeker, Hidder
+                                remote = (Seeker if is_seeker else Hidder)((px, py), self.all_sprites, self.collision_sprites, controlled=False, name=pname)
+                            except Exception:
+                                remote = Player((px, py), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
                             try:
                                 if pname:
                                     remote.name = pname
@@ -310,31 +229,38 @@ class Game:
                             self.remote_map[idx] = remote
             else:
                 # Fallback: create a single remote player at an offset for older server behavior
-                remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
-                self.remote_map[1 if my_index in (0, None) else 0] = remote
+                try:
+                    from player import Seeker, Hidder
+                    remote = (Hidder if is_local_seeker else Seeker)((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, name=None)
+                except Exception:
+                    remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
+                sidx = self.state.my_index if getattr(self, 'state', None) else None
+                self.remote_map[1 if sidx in (0, None) else 0] = remote
         except Exception:
             # best-effort fallback
             try:
-                remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
+                try:
+                    from player import Seeker, Hidder
+                    remote = (Hidder if is_local_seeker else Seeker)((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, name=None)
+                except Exception:
+                    remote = Player((self.start_pos[0] + 100, self.start_pos[1]), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=(not is_local_seeker))
                 self.remote_map[1] = remote
             except Exception:
                 pass
 
         self.setup()
+        # HUD renderer
+        self.hud = HUDRenderer(self)
+        # Input handler
+        self.input = InputHandler(self)
+        # World renderer
+        self.world = WorldRenderer(self)
         # Game over / caught state
         self.game_over = False
         self.game_over_start = None
         self.winner_text = ""
-        # Round timer base (server-provided epoch ms)
-        self.round_base = self.server_round_base
-        # round stopped flag and stop timestamp (epoch ms)
-        self.round_stopped = False
-        self.round_stop_ms = None
-        # load whistle sound for hidders (best-effort)
-        try:
-            self.whistle_sound = pygame.mixer.Sound(resource_path(os.path.join("sounds", "whistle.wav")))
-        except Exception:
-            self.whistle_sound = None
+        # Round timer handled by service; initially configured above
+        # Audio: background ambience
         # remember last second when we played the whistle so we only play once per interval
         self._last_whistle_second = None
         # debug: last whistle proximity info (volume 0.0-1.0, pan -1..1, timestamp ms)
@@ -343,24 +269,7 @@ class Game:
         self._last_whistle_time = 0
         # background ambience: looped beach sound
         try:
-            bg_path = resource_path(os.path.join("sounds", "beach_background.mp3"))
-            # use music module for long, looped background audio
-            try:
-                pygame.mixer.music.load(bg_path)
-                pygame.mixer.music.set_volume(0.4)
-                pygame.mixer.music.play(-1)  # loop indefinitely
-            except Exception:
-                # fall back to a Sound object if music fails
-                try:
-                    self._bg_sound = pygame.mixer.Sound(bg_path)
-                    ch = pygame.mixer.find_channel()
-                    if ch:
-                        ch.play(self._bg_sound, loops=-1)
-                        ch.set_volume(0.4)
-                    else:
-                        self._bg_sound.play(loops=-1)
-                except Exception:
-                    pass
+            self.audio.play_bg_loop(os.path.join("sounds", "beach_background.mp3"), volume=0.4)
         except Exception:
             pass
 
@@ -459,117 +368,30 @@ class Game:
                 # # self.player2 = Player((self.other_player_pos.x + 100, self.other_player_pos.y),
                 # #                      self.all_sprites,
                 # #                      self.collision_sprites)
+    # Audio helpers now delegated to AudioService (kept for compatibility)
     def _play_whistle_at(self, source_pos):
-        """Play the loaded whistle sound as if originating from source_pos (x,y).
-        Volume and stereo panning are computed based on listener (local player) position.
-        """
-        if not getattr(self, 'whistle_sound', None):
-            return
         try:
-            listener_x = int(self.player.hitbox.centerx)
-            listener_y = int(self.player.hitbox.centery)
-            sx, sy = int(source_pos[0]), int(source_pos[1])
-            dx = sx - listener_x
-            dy = sy - listener_y
-            dist = math.hypot(dx, dy)
-
-            # tuning constants
-            MAX_HEAR_DIST = 2000.0  # increase audible radius so seeker hears distant whistles
-            if dist > MAX_HEAR_DIST:
-                # still store debug info with zero volume
-                try:
-                    self._last_whistle_volume = 0.0
-                    self._last_whistle_pan = 0.0
-                    self._last_whistle_time = pygame.time.get_ticks()
-                except Exception:
-                    pass
-                try:
-                    self._last_whistle_volume = 0.0
-                    self._last_whistle_pan = 0.0
-                    self._last_whistle_time = pygame.time.get_ticks()
-                except Exception:
-                    pass
-                return
-            # linear distance attenuation (1.0..0.0) with gentle falloff
-            vol = max(0.0, 1.0 - (dist / MAX_HEAR_DIST))
-
-            # stereo panning based on horizontal offset; pan_norm in [-1..1]
-            pan_range = max(WINDOW_WIDTH / 2.0, 200.0)
-            # invert horizontal offset when computing pan so game X -> audio L/R match
-            # (previously used dx/pan_range which produced inverted left/right on some setups)
-            pan_norm = max(-1.0, min(1.0, -dx / pan_range))
-            # store debug info for HUD (after pan_norm computed)
+            listener = (int(self.player.hitbox.centerx), int(self.player.hitbox.centery))
+            self.audio.play_whistle_at(listener, (int(source_pos[0]), int(source_pos[1])), 2000.0, WINDOW_WIDTH)
+            # store debug info for HUD
             try:
+                dx = int(source_pos[0]) - listener[0]
+                import math as _m
+                dist = _m.hypot(dx, int(source_pos[1]) - listener[1])
+                vol = max(0.0, 1.0 - (dist / 2000.0))
+                pan_range = max(WINDOW_WIDTH / 2.0, 200.0)
+                pan_norm = max(-1.0, min(1.0, -dx / pan_range))
                 self._last_whistle_volume = vol
                 self._last_whistle_pan = pan_norm
                 self._last_whistle_time = pygame.time.get_ticks()
             except Exception:
                 pass
-            left = vol * (1.0 - pan_norm) / 2.0
-            right = vol * (1.0 + pan_norm) / 2.0
-
-            # attempt to grab a free channel so we can set per-channel stereo volumes
-            ch = None
-            try:
-                ch = pygame.mixer.find_channel()
-            except Exception:
-                ch = None
-
-            if ch:
-                try:
-                    ch.set_volume(left, right)
-                    ch.play(self.whistle_sound)
-                except Exception:
-                    # fallback
-                    try:
-                        self.whistle_sound.set_volume(vol)
-                        self.whistle_sound.play()
-                    except Exception:
-                        pass
-            else:
-                try:
-                    self.whistle_sound.set_volume(vol)
-                    self.whistle_sound.play()
-                except Exception:
-                    try:
-                        self.whistle_sound.play()
-                    except Exception:
-                        pass
         except Exception:
-            # defensive: don't break the game loop on audio failures
             pass
 
     def _play_whistle_normal(self):
-        """Play the whistle at full volume (no positional attenuation).
-        Also update debug HUD fields.
-        """
-        if not getattr(self, 'whistle_sound', None):
-            return
         try:
-            ch = None
-            try:
-                ch = pygame.mixer.find_channel()
-            except Exception:
-                ch = None
-            if ch:
-                try:
-                    ch.set_volume(1.0, 1.0)
-                    ch.play(self.whistle_sound)
-                except Exception:
-                    try:
-                        self.whistle_sound.set_volume(1.0)
-                        self.whistle_sound.play()
-                    except Exception:
-                        pass
-            else:
-                try:
-                    self.whistle_sound.set_volume(1.0)
-                    self.whistle_sound.play()
-                except Exception:
-                    try:
-                        self.whistle_sound.play()
-                    except Exception:
-                        pass
+            self.audio.play_whistle_normal()
             # debug info
             try:
                 self._last_whistle_volume = 1.0
@@ -580,103 +402,7 @@ class Game:
         except Exception:
             pass
 
-    def draw_players_tab(self):
-        """Compact players tab styled like the controls helper (stacked small panels).
-        Each player row uses a semi-opaque panel, a colored icon box, and text to the right.
-        """
-        try:
-            entries = []
-            try:
-                local_name = getattr(self.player, 'name', None) or 'You'
-                local_role = 'Seeker' if getattr(self.player, 'isSeeker', False) else 'Hidder'
-                entries.append((local_name, local_role, True))
-            except Exception:
-                pass
-            try:
-                for idx, rp in sorted((getattr(self, 'remote_map', {}) or {}).items()):
-                    try:
-                        pname = getattr(rp, 'name', None) or f'Player{idx}'
-                        prot = 'Seeker' if getattr(rp, 'isSeeker', False) else 'Hidder'
-                        entries.append((pname, prot, False))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-            if not entries:
-                return
-
-            # visual constants (match controls helper)
-            padding = 8
-            icon_size = 22
-            font = self.font if getattr(self, 'font', None) else pygame.font.SysFont(None, 18)
-            row_h = max(icon_size, font.get_height()) + 8
-            total_h = row_h * len(entries)
-
-            panel_w = max(220, 8 + icon_size + 8 + 8 + max((font.size(f"[{r}] {n}")[0] for n, r, _ in entries)))
-            panel_w = min(panel_w, WINDOW_WIDTH // 4)
-
-            base_x = WINDOW_WIDTH - panel_w - 12
-            base_y = (WINDOW_HEIGHT // 2) - (total_h // 2)
-
-            for i, (name, role, is_local) in enumerate(entries):
-                y = base_y + i * row_h
-                # small semi-opaque panel similar to controls helper
-                panel_h = row_h
-                panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-                panel_surf.fill((0, 0, 0, 140))
-
-                # icon box (colored by role)
-                icon_x = padding
-                icon_y = (panel_h - icon_size) // 2
-                if role.lower().startswith('seek'):
-                    color = (60, 140, 200)
-                else:
-                    color = (220, 140, 40)
-                try:
-                    pygame.draw.rect(panel_surf, color, (icon_x, icon_y, icon_size, icon_size), border_radius=6)
-                except TypeError:
-                    pygame.draw.rect(panel_surf, color, (icon_x, icon_y, icon_size, icon_size))
-
-                # draw role initial inside icon (small)
-                try:
-                    letter = 'S' if role.lower().startswith('seek') else 'H'
-                    letter_s = font.render(letter, True, (0, 0, 0))
-                    lx = icon_x + (icon_size - letter_s.get_width()) // 2
-                    ly = icon_y + (icon_size - letter_s.get_height()) // 2
-                    panel_surf.blit(letter_s, (lx, ly))
-                except Exception:
-                    pass
-
-                # role tag and name to the right
-                try:
-                    tag_text = f"[{role.capitalize()}]"
-                    tag_s = font.render(tag_text, True, (200, 200, 200))
-                    name_s = font.render(name, True, (240, 220, 160))
-                    text_x = icon_x + icon_size + 8
-                    text_y = (panel_h - name_s.get_height()) // 2
-                    panel_surf.blit(tag_s, (text_x, text_y))
-                    panel_surf.blit(name_s, (text_x + tag_s.get_width() + 6, text_y))
-                except Exception:
-                    pass
-
-                # highlight panel for local player
-                if is_local:
-                    try:
-                        highlight = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-                        highlight.fill((255, 255, 255, 16))
-                        panel_surf.blit(highlight, (0,0))
-                    except Exception:
-                        pass
-
-                # blit row to main display
-                try:
-                    self.display_surface.blit(panel_surf, (base_x, y))
-                except Exception:
-                    pass
-
-        except Exception:
-            pass
+    
 
     def run(self):
         while self.running:
@@ -684,340 +410,38 @@ class Game:
             dt = self.clock.tick(FPS) / 1000  # Delta time in seconds.
 
             for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_x:
-                        # interact: equip object in front or unequip
-                        # If game already over, ignore
-                        if self.game_over:
-                            continue
-                        # If local player is frozen, they cannot interact
-                        if getattr(self.player, '_frozen', False):
-                            continue
-
-                        # If player is seeker, attempt to catch the other player
-                        if getattr(self.player, 'isSeeker', False):
-                            # build a small probe rect in front of seeker (similar to get_object_in_front)
-                            probe_w, probe_h = 24, 24
-                            if self.player.state == 'up':
-                                probe = pygame.Rect(self.player.hitbox.centerx - probe_w//2,
-                                                    self.player.hitbox.top - 16 - probe_h,
-                                                    probe_w, probe_h)
-                            elif self.player.state == 'down':
-                                probe = pygame.Rect(self.player.hitbox.centerx - probe_w//2,
-                                                    self.player.hitbox.bottom + 16,
-                                                    probe_w, probe_h)
-                            elif self.player.state == 'left':
-                                probe = pygame.Rect(self.player.hitbox.left - 16 - probe_w,
-                                                    self.player.hitbox.centery - probe_h//2,
-                                                    probe_w, probe_h)
-                            else:  # right
-                                probe = pygame.Rect(self.player.hitbox.right + 16,
-                                                    self.player.hitbox.centery - probe_h//2,
-                                                    probe_w, probe_h)
-
-                            # check collisions against all remote players to find a hit target
-                            try:
-                                target_idx = None
-                                for idx, rp in getattr(self, 'remote_map', {}).items():
-                                    try:
-                                        other_hitbox = rp.hitbox
-                                    except Exception:
-                                        other_hitbox = rp.rect
-                                    if probe.colliderect(other_hitbox):
-                                        target_idx = idx
-                                        # mark remote frozen locally so seeker sees immediate effect
-                                        try:
-                                            rp._frozen = True
-                                            rp.can_move = False
-                                            try:
-                                                rp.unequip()
-                                            except Exception:
-                                                pass
-                                        except Exception:
-                                            pass
-                                        break
-                                if target_idx is not None:
-                                    # instruct server to broadcast the CAUGHT event targeted
-                                    # at the given index by setting our outgoing equip marker
-                                    try:
-                                        # mark remote frozen locally so seeker sees immediate effect
-                                        rp_local = self.remote_map.get(target_idx)
-                                        if rp_local is not None:
-                                            try:
-                                                rp_local._frozen = True
-                                                rp_local.can_move = False
-                                                try:
-                                                    rp_local.unequip()
-                                                except Exception:
-                                                    pass
-                                            except Exception:
-                                                pass
-
-                                        self.player._caught = f"CAUGHT:{target_idx}"
-                                    except Exception:
-                                        pass
-
-                                    # Send the CAUGHT event immediately so the server/state updates
-                                    # and other clients learn about the freeze without waiting
-                                    # for the next frame payload (helps with multi-hider scenarios).
-                                    try:
-                                        px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
-                                        payload = (px, py, self.player.state, int(self.player.frame_index), str(self.player._caught), 0)
-                                        # send once immediately (non-blocking)
-                                        try:
-                                            self.network.send(self.make_pos(payload), wait_for_reply=False)
-                                        except Exception:
-                                            pass
-                                        # clear transient _caught after sending
-                                        try:
-                                            if hasattr(self.player, '_caught'):
-                                                del self.player._caught
-                                        except Exception:
-                                            pass
-                                    except Exception:
-                                        pass
-
-                                    # Do not declare win locally here — server will broadcast the winner
-                            except Exception:
-                                pass
-
-                        # Not a seeker or didn't catch: proceed with transform/unequip for hidders
-                        obj = self.player.get_object_in_front(self.collision_sprites)
-                        if obj:
-                            try:
-                                self.player.equip(obj.image)
-                                # record equipped object id to sync over network
-                                if hasattr(obj, 'obj_id'):
-                                    self.player._equipped_id = obj.obj_id
-                            except Exception:
-                                pass
-                        else:
-                            self.player.unequip()
-                            if hasattr(self.player, '_equipped_id'):
-                                del self.player._equipped_id
-
-                    elif event.key == pygame.K_y:
-                        # Hidder manual whistle: broadcast a WHISTLE event so seeker(s) hear positional audio.
-                        # Only allow if game active and local player not a seeker and not frozen.
-                        if self.game_over:
-                            continue
-                        if getattr(self.player, '_frozen', False):
-                            continue
-                        # Only hidders can whistle to attract the seeker
-                        if not getattr(self.player, 'isSeeker', False):
-                            try:
-                                # mark for network broadcast (next outgoing payload will carry WHISTLE)
-                                self.player._whistle_emit = True
-                            except Exception:
-                                pass
-                            # play locally as non-positional for the hidder
-                            try:
-                                self._play_whistle_normal()
-                            except Exception:
-                                pass
-
-                            # send an immediate broadcast so seeker(s) hear the whistle without waiting for next frame
-                            try:
-                                px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
-                                try:
-                                    safe_name = (getattr(self.player, 'name', '') or '')
-                                except Exception:
-                                    safe_name = ''
-                                payload_obj = {
-                                    'x': px,
-                                    'y': py,
-                                    'state': self.player.state,
-                                    'frame': int(self.player.frame_index),
-                                    'equip': 'WHISTLE',
-                                    'equip_frame': 0,
-                                    'name': safe_name
-                                }
-                                try:
-                                    self.network.send(json.dumps(payload_obj), wait_for_reply=False)
-                                except Exception:
-                                    # fallback to CSV payload if JSON fails
-                                    payload = (px, py, self.player.state, int(self.player.frame_index), 'WHISTLE', 0, safe_name.replace(',', ''))
-                                    try:
-                                        self.network.send(self.make_pos(payload), wait_for_reply=False)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
+                self.input.handle_event(event)
 
             # Send the player's hitbox center + animation state/frame so the
             # remote client can show correct animation. We'll send a 4-part
             # payload: x,y,state,frame
             px, py = int(self.player.hitbox.centerx), int(self.player.hitbox.centery)
-            # include equipped object id if any so remote clients can show the same
-            # priority: CAUGHT -> WHISTLE event -> equipped object -> None
-            if hasattr(self.player, '_caught') and self.player._caught:
-                # _caught may be a string like 'CAUGHT:<target_idx>' when targeting a specific player
-                try:
-                    equip_id = str(self.player._caught)
-                except Exception:
-                    equip_id = 'CAUGHT'
-                equip_frame = 0
-            elif getattr(self.player, '_whistle_emit', False):
-                equip_id = 'WHISTLE'
-                equip_frame = 0
-            elif getattr(self.player, '_equipped', False) and hasattr(self.player, '_equipped_id'):
-                equip_id = str(self.player._equipped_id)
-                equip_frame = int(self.player.frame_index)
-            else:
-                equip_id = 'None'
-                equip_frame = 0
-
-            # include player name and send as JSON
+            # build outgoing state and send (JSON preferred, CSV fallback)
             try:
                 safe_name = (getattr(self.player, 'name', '') or '')
             except Exception:
                 safe_name = ''
-            payload_obj = {
-                'x': px,
-                'y': py,
-                'state': self.player.state,
-                'frame': int(self.player.frame_index),
-                'equip': equip_id,
-                'equip_frame': equip_frame,
-                'name': safe_name
-            }
+            j, csv = build_outgoing_strings(self.player, safe_name, self.state)
             try:
-                # non-blocking send: server broadcasts will be received by background thread
-                self.network.send(json.dumps(payload_obj), wait_for_reply=False)
+                if j:
+                    self.network.send(j, wait_for_reply=False)
+                else:
+                    self.network.send(csv, wait_for_reply=False)
             except Exception:
-                # fallback to old CSV if needed
-                payload = (px, py, self.player.state, int(self.player.frame_index), equip_id, equip_frame, safe_name.replace(',', ''))
-                try:
-                    self.network.send(self.make_pos(payload), wait_for_reply=False)
-                except Exception:
-                    pass
+                pass
             # poll for any incoming server broadcast (non-blocking)
             try:
                 resp = self.network.get_latest()
             except Exception:
                 resp = None
-            # clear transient whistle emit so it is only broadcast once
+            # Clear one-shot state flags after sending
             try:
-                if hasattr(self.player, '_whistle_emit'):
-                    del self.player._whistle_emit
-            except Exception:
-                pass
-            # clear transient CAUGHT marker so we don't repeatedly broadcast it
-            try:
-                if hasattr(self.player, '_caught'):
-                    del self.player._caught
+                self.state.whistle_emit = False
+                self.state.caught_target = None
             except Exception:
                 pass
             if resp:
-                # Server now sends all players' positions joined by '|' and metadata separated by '::'.
-                # Parse accordingly and update every remote player we know about.
-                def _parse_resp(resp):
-                    # returns (positions_list, round_start_or_None, winner_or_None)
-                    if resp is None:
-                        return ([], None, None)
-                    # if server sent JSON, parse it directly
-                    try:
-                        j = json.loads(resp)
-                        if isinstance(j, dict) and 'positions' in j:
-                            positions = []
-                            for p in j.get('positions', []):
-                                try:
-                                    x = int(p.get('x', 0))
-                                except Exception:
-                                    x = 0
-                                try:
-                                    y = int(p.get('y', 0))
-                                except Exception:
-                                    y = 0
-                                state = p.get('state', 'down')
-                                try:
-                                    frame = int(p.get('frame', 0))
-                                except Exception:
-                                    frame = 0
-                                equip = p.get('equip', 'None')
-                                try:
-                                    equip_frame = int(p.get('equip_frame', 0))
-                                except Exception:
-                                    equip_frame = 0
-                                name = p.get('name')
-                                # sanitize
-                                if isinstance(name, str):
-                                    try:
-                                        name = name.split('::')[0].strip()
-                                    except Exception:
-                                        name = name.strip()
-                                occupied = p.get('occupied', True)
-                                positions.append((x, y, state, frame, equip, equip_frame, name, occupied))
-                            round_start = j.get('round_start')
-                            winner = j.get('winner')
-                            return (positions, round_start, winner)
-                    except Exception:
-                        pass
-                    # split off trailing metadata safely using rsplit so names
-                    # don't accidentally absorb the trailing '::role::round::winner'
-                    try:
-                        parts = resp.rsplit('::', 3)
-                    except Exception:
-                        parts = [resp]
-                    round_start = None
-                    winner = None
-                    if len(parts) == 4:
-                        all_positions_str, role_s, round_s, winner_s = parts
-                        try:
-                            round_start = int(round_s)
-                        except Exception:
-                            round_start = None
-                        winner = winner_s if winner_s != 'None' else None
-                    elif len(parts) == 3:
-                        all_positions_str, round_s, winner_s = parts
-                        try:
-                            round_start = int(round_s)
-                        except Exception:
-                            round_start = None
-                        winner = winner_s if winner_s != 'None' else None
-                    else:
-                        all_positions_str = parts[0]
-
-                    positions = []
-                    try:
-                        if all_positions_str:
-                            entries = all_positions_str.split('|')
-                            for e in entries:
-                                if not e:
-                                    continue
-                                parts_c = e.split(',')
-                                try:
-                                    x = int(parts_c[0]); y = int(parts_c[1])
-                                except Exception:
-                                    continue
-                                state = parts_c[2] if len(parts_c) >= 3 else 'down'
-                                try:
-                                    frame = int(parts_c[3]) if len(parts_c) >= 4 else 0
-                                except Exception:
-                                    frame = 0
-                                equip_id = parts_c[4] if len(parts_c) >= 5 else 'None'
-                                try:
-                                    equip_frame = int(parts_c[5]) if len(parts_c) >= 6 else 0
-                                except Exception:
-                                    equip_frame = 0
-                                name = parts_c[6] if len(parts_c) >= 7 else None
-                                # sanitize
-                                if isinstance(name, str):
-                                    try:
-                                        name = name.split('::')[0].strip()
-                                    except Exception:
-                                        name = name.strip()
-                                # older CSV-style responses don't include occupied flag;
-                                # assume occupied for backward compatibility
-                                positions.append((x, y, state, frame, equip_id, equip_frame, name, True))
-                    except Exception:
-                        positions = []
-
-                    return (positions, round_start, winner)
-
-                positions_list, round_start, winner = _parse_resp(resp)
+                positions_list, round_start, winner = parse_tick(resp)
                 # update server-provided round start if a valid epoch ms is provided
                 try:
                     rs = None
@@ -1028,8 +452,7 @@ class Game:
                     except Exception:
                         rs = None
                     if rs is not None:
-                        self.server_round_base = rs
-                        self.round_base = self.server_round_base
+                        self.timer.set_round_base(rs)
                 except Exception:
                     pass
 
@@ -1041,7 +464,7 @@ class Game:
                             if not self.game_over:
                                 self.game_over = True
                                 self.game_over_start = pygame.time.get_ticks()
-                                if widx == self.my_index:
+                                if widx == self.state.my_index:
                                     self.winner_text = "You win!"
                                 else:
                                     # Distinguish seeker vs hidder wins
@@ -1049,8 +472,16 @@ class Game:
                                         self.winner_text = "Seeker wins!"
                                     else:
                                         self.winner_text = "Hidder wins!"
-                                self.round_stopped = True
-                                self.round_stop_ms = int(time.time() * 1000)
+                                try:
+                                    self.timer.stop()
+                                except Exception:
+                                    pass
+                                # mirror into state
+                                try:
+                                    self.state.game_over = True
+                                    self.state.winner_text = self.winner_text
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
                 except Exception:
@@ -1079,7 +510,7 @@ class Game:
                             continue
 
                         # If this entry is the local player, skip applying remote updates
-                        if idx == self.my_index:
+                        if idx == self.state.my_index:
                             continue
 
                         # If slot is not occupied, remove any existing remote player
@@ -1105,7 +536,11 @@ class Game:
                         if idx not in self.remote_map:
                             try:
                                 is_seeker = (idx == 0)
-                                remote = Player((x, y), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
+                                try:
+                                    from player import Seeker, Hidder
+                                    remote = (Seeker if is_seeker else Hidder)((x, y), self.all_sprites, self.collision_sprites, controlled=False, name=pname)
+                                except Exception:
+                                    remote = Player((x, y), self.all_sprites, self.collision_sprites, controlled=False, isSeeker=is_seeker)
                                 if pname:
                                     remote.name = pname
                                 self.remote_map[idx] = remote
@@ -1138,26 +573,32 @@ class Game:
                                     target_idx = None
                                 if target_idx is not None:
                                     # if target is local player, freeze ourselves
-                                    if target_idx == self.my_index:
+                                    if target_idx == self.state.my_index:
                                         if not getattr(self.player, 'isSeeker', False):
-                                            self.player._frozen = True
-                                            self.player.can_move = False
                                             try:
-                                                self.player.unequip()
+                                                self.player.freeze()
                                             except Exception:
-                                                pass
+                                                self.player._frozen = True
+                                                self.player.can_move = False
+                                                try:
+                                                    self.player.unequip()
+                                                except Exception:
+                                                    pass
                                     else:
                                         # freeze the targeted remote player
                                         if hasattr(self, 'remote_map') and target_idx in self.remote_map:
                                             try:
-                                                self.remote_map[target_idx]._frozen = True
-                                                self.remote_map[target_idx].can_move = False
+                                                self.remote_map[target_idx].freeze()
+                                            except Exception:
                                                 try:
-                                                    self.remote_map[target_idx].unequip()
+                                                    self.remote_map[target_idx]._frozen = True
+                                                    self.remote_map[target_idx].can_move = False
+                                                    try:
+                                                        self.remote_map[target_idx].unequip()
+                                                    except Exception:
+                                                        pass
                                                 except Exception:
                                                     pass
-                                            except Exception:
-                                                pass
                             elif equip_id == 'WHISTLE':
                                 # someone emitted a whistle; if local is seeker, play positional
                                 try:
@@ -1198,6 +639,12 @@ class Game:
                                     self.winner_text = "Seeker wins!"
                                     self.round_stopped = True
                                     self.round_stop_ms = int(time.time() * 1000)
+                                    # mirror into state
+                                    try:
+                                        self.state.game_over = True
+                                        self.state.winner_text = self.winner_text
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
                 except Exception:
@@ -1205,14 +652,11 @@ class Game:
 
             # update round timer and movement permission (use epoch ms from server)
             now_ms = int(time.time() * 1000)
-            # Treat any non-numeric or non-positive base as 'not started yet'
-            if not isinstance(self.round_base, (int, float)) or self.round_base <= 0:
+            timer_seconds = None
+            try:
+                timer_seconds = self.timer.elapsed_seconds(now_ms)
+            except Exception:
                 timer_seconds = None
-            else:
-                if getattr(self, 'round_stopped', False) and self.round_stop_ms is not None:
-                    timer_seconds = (self.round_stop_ms - self.round_base) / 1000.0
-                else:
-                    timer_seconds = (now_ms - self.round_base) / 1000.0
             # ensure player can_move only when not a seeker OR when timer > 0
             try:
                 if getattr(self.player, 'isSeeker', False):
@@ -1227,7 +671,7 @@ class Game:
             # Broadcast a WHISTLE event (sent via the regular payload) so other clients
             # can play the whistle with positional audio. Also play locally.
             try:
-                if (not getattr(self.player, 'isSeeker', False)) and timer_seconds is not None and timer_seconds > 0 and self.whistle_sound:
+                if (not getattr(self.player, 'isSeeker', False)) and timer_seconds is not None and timer_seconds > 0:
                     ts_sec = int(timer_seconds)
                     if ts_sec % 25 == 0 and ts_sec != self._last_whistle_second:
                         # mark for network broadcast (next outgoing payload will carry WHISTLE)
@@ -1250,269 +694,23 @@ class Game:
 
             # draw (render the world once, centered on the local player)
             self.display_surface.fill((30, 30, 30))
-            self.all_sprites.draw(self.player.rect.center)
-            # Draw player names above each character (remote and local)
+            self.world.draw()
+            # Names above players
+            self.hud.draw_names()
+            # Role, hints, and caught counter
+            self.hud.draw_role_and_hint()
+            # Timer panel and controls helper
+            self.hud.draw_timer_and_controls(timer_seconds)
+            # Right-side players tab
+            self.hud.draw_players_tab()
+            # Overlays (frozen/game over)
+            self.hud.draw_overlays()
+            # Auto-exit to menu after showing game over for 10 seconds
             try:
-                # remote players
-                offset = getattr(self.all_sprites, 'offset', pygame.math.Vector2(0,0))
-                for idx, rp in (getattr(self, 'remote_map', {})).items():
-                    try:
-                        # Do not draw nametag while player is transformed/equipped
-                        if getattr(rp, '_equipped', False):
-                            continue
-                        name = getattr(rp, 'name', None)
-                        if name:
-                            nm_s = self.font.render(str(name), True, (255, 255, 255))
-                            x = rp.rect.centerx + offset.x - nm_s.get_width()//2
-                            y = rp.rect.top + offset.y - nm_s.get_height() - 6
-                            # draw subtle shadow for readability
-                            shadow = self.font.render(str(name), True, (0,0,0))
-                            self.display_surface.blit(shadow, (x+1, y+1))
-                            self.display_surface.blit(nm_s, (x, y))
-                    except Exception:
-                        pass
-                # local player
-                try:
-                    # Do not draw local player's nametag while transformed/equipped
-                    if not getattr(self.player, '_equipped', False):
-                        lname = getattr(self.player, 'name', None)
-                        if lname:
-                            ln_s = self.font.render(str(lname), True, (200, 220, 255))
-                            lx = self.player.rect.centerx + offset.x - ln_s.get_width()//2
-                            ly = self.player.rect.top + offset.y - ln_s.get_height() - 6
-                            shadow = self.font.render(str(lname), True, (0,0,0))
-                            self.display_surface.blit(shadow, (lx+1, ly+1))
-                            self.display_surface.blit(ln_s, (lx, ly))
-                except Exception:
-                    pass
+                if self.game_over and self.game_over_start and pygame.time.get_ticks() - self.game_over_start >= 10000:
+                    self.running = False
             except Exception:
                 pass
-            # HUD: show role and hint for hidders
-            try:
-                role_text = "Role: Seeker" if getattr(self.player, 'isSeeker', False) else "Role: Hidder"
-                role_surf = self.font.render(role_text, True, (255, 255, 255))
-                # draw semi-opaque background for readability
-                bg_rect = role_surf.get_rect(topleft=(8, 8)).inflate(8, 8)
-                s = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-                s.fill((0, 0, 0, 120))
-                self.display_surface.blit(s, bg_rect.topleft)
-                self.display_surface.blit(role_surf, (12, 12))
-
-                # hint for hidders
-                hint_y = 12 + role_surf.get_height() + 6
-                if not getattr(self.player, 'isSeeker', False):
-                    hint_surf = self.font.render("Press X to transform", True, (200, 200, 0))
-                    self.display_surface.blit(hint_surf, (12, hint_y))
-                    hint_y += hint_surf.get_height() + 6
-
-                # show seeker progress: number of hidders caught out of total
-                try:
-                    if getattr(self.player, 'isSeeker', False):
-                        frozen_known = 0
-                        total_hidders = max(0, NUM_PLAYERS - 1)
-                        for idx, rp in (getattr(self, 'remote_map', {})).items():
-                            if not getattr(rp, 'isSeeker', False) and getattr(rp, '_frozen', False):
-                                frozen_known += 1
-                        caught_text = f"Caught: {frozen_known}/{total_hidders}"
-                        caught_surf = self.font.render(caught_text, True, (200, 200, 0))
-                        self.display_surface.blit(caught_surf, (12, hint_y))
-                        hint_y += caught_surf.get_height() + 6
-                except Exception:
-                    pass
-
-                # (timer is rendered separately at the top-center)
-            except Exception:
-                pass
-
-            # render round timer at top-center with 50% opaque black background and thick white text
-            try:
-                # If timer_seconds is None, the server hasn't started the round yet
-                if timer_seconds is None:
-                    # show number of players joined / expected (include local player)
-                    try:
-                        joined = 1 + len(getattr(self, 'remote_map', {}))
-                    except Exception:
-                        joined = 1
-                    text = f"Waiting for other players — {joined}/{NUM_PLAYERS}"
-                else:
-                    # timer_seconds is elapsed seconds since the round base (may be negative before hide end)
-                    elapsed = float(timer_seconds)
-                    # Configuration
-                    HIDE_SECONDS = 30
-                    PER_HIDDER_SECONDS = 45
-                    total_hidders = max(0, NUM_PLAYERS - 1)
-                    total_hunt_seconds = PER_HIDDER_SECONDS * total_hidders
-
-                    if elapsed < 0:
-                        # Before the hide phase ends: round_base is in the future.
-                        # Remaining hide time is -elapsed (seconds until hide end).
-                        remaining = max(0.0, -elapsed)
-                        phase_label = "Hidders hide"
-                    else:
-                        # After hide end: elapsed counts time since hide finished.
-                        hunt_elapsed = elapsed
-                        remaining = max(0.0, total_hunt_seconds - hunt_elapsed)
-                        phase_label = "Seeker hunting"
-
-                    # Show countdown as MM:SS; use ceil so UI shows full last second
-                    try:
-                        import math as _math
-                        secs = int(_math.ceil(remaining))
-                    except Exception:
-                        secs = int(max(0, remaining))
-                    mins = secs // 60
-                    secs_rem = secs % 60
-                    timer_text = f"{mins:02d}:{secs_rem:02d}"
-                    text = f"{phase_label} — {timer_text}"
-
-                # render large text surface
-                txt_surf = self.large_font.render(text, True, (255, 255, 255))
-                w, h = txt_surf.get_size()
-                padding_x, padding_y = 16, 8
-
-                panel_w = w + padding_x * 2
-                panel_h = h + padding_y * 2
-                panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-                # 50% opacity black background
-                panel_surf.fill((0, 0, 0, 128))
-
-                # make thick text by blitting the text multiple times with slight offsets
-                text_surf = self.large_font.render(text, True, (255, 255, 255))
-                w, h = text_surf.get_size()
-                thick_surf = pygame.Surface((w + 4, h + 4), pygame.SRCALPHA)
-                offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)]
-                for ox, oy in offsets:
-                    thick_surf.blit(self.large_font.render(text, True, (255, 255, 255)), (ox + 2, oy + 2))
-
-                # center thick_surf inside panel
-                panel_surf.blit(thick_surf, (padding_x - 2, padding_y - 2))
-
-                # blit panel at top center
-                x = (WINDOW_WIDTH - panel_w) // 2
-                y = 8
-                self.display_surface.blit(panel_surf, (x, y))
-
-                # Debug: if a whistle was recently played, show proximity volume in bottom-left
-                try:
-                    now_ms = pygame.time.get_ticks()
-                    if getattr(self, '_last_whistle_time', 0) and now_ms - self._last_whistle_time <= 3000 and self._last_whistle_volume is not None:
-                        vol = max(0.0, min(1.0, float(self._last_whistle_volume)))
-                        pan = getattr(self, '_last_whistle_pan', 0.0)
-                        percent = int(vol * 100)
-                        txt = f"Whistle vol: {percent}%"
-                        txt_surf2 = self.font.render(txt, True, (255, 255, 255))
-                        padding = 6
-                        bg_rect = txt_surf2.get_rect(bottomleft=(12, WINDOW_HEIGHT - 12)).inflate(padding * 2, padding * 2)
-                        s2 = pygame.Surface((bg_rect.width, bg_rect.height), pygame.SRCALPHA)
-                        s2.fill((0, 0, 0, 160))
-                        self.display_surface.blit(s2, bg_rect.topleft)
-                        self.display_surface.blit(txt_surf2, (bg_rect.left + padding, bg_rect.top + padding))
-                        # draw a small volume bar below the text
-                        bar_w = 120
-                        bar_h = 10
-                        bar_x = bg_rect.left + padding
-                        bar_y = bg_rect.top + padding + txt_surf2.get_height() + 6
-                        # border
-                        pygame.draw.rect(self.display_surface, (200, 200, 200), (bar_x - 1, bar_y - 1, bar_w + 2, bar_h + 2), 1)
-                        fill_w = int(vol * bar_w)
-                        pygame.draw.rect(self.display_surface, (100, 220, 100), (bar_x, bar_y, fill_w, bar_h))
-                except Exception:
-                    pass
-
-                # Controls helper: show controller-button style hints in bottom-left
-                try:
-                    # entries ordered top-to-bottom to match reference image
-                    # X label is conditional: 'Check' for seeker, 'Transform' for hidder
-                    x_label = 'Check' if getattr(self, 'player', None) and getattr(self.player, 'isSeeker', False) else 'Transform'
-                    # Y = Whistle for hidders, Inventory for seeker (keep previous behaviour for seeker)
-                    try:
-                        if getattr(self.player, 'isSeeker', False):
-                            y_label = 'Inventory'
-                        else:
-                            y_label = 'Whistle'
-                    except Exception:
-                        y_label = 'Inventory'
-                    entries = [
-                        ('Y', (220, 180, 40), y_label),
-                        ('X', (60, 140, 220), x_label),
-                    ]
-                    padding = 8
-                    icon_size = 22
-                    font_h = self.font.get_height()
-                    row_h = max(icon_size, font_h) + 8
-                    # compute base y so the whole stack sits above bottom margin
-                    total_h = row_h * len(entries)
-                    base_x = 12
-                    base_y = WINDOW_HEIGHT - 12 - total_h
-                    for i, (label_char, color, label_text) in enumerate(entries):
-                        y = base_y + i * row_h
-                        # render label text
-                        txt_surf = self.font.render(label_text, True, (255, 255, 255))
-                        panel_w = icon_size + 8 + txt_surf.get_width() + padding * 2
-                        panel_h = row_h
-                        # semi-opaque background panel for readability
-                        panel_surf = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
-                        panel_surf.fill((0, 0, 0, 140))
-                        self.display_surface.blit(panel_surf, (base_x, y))
-
-                        # icon box (rounded)
-                        icon_x = base_x + padding
-                        icon_y = y + (panel_h - icon_size) // 2
-                        try:
-                            pygame.draw.rect(self.display_surface, color, (icon_x, icon_y, icon_size, icon_size), border_radius=6)
-                        except TypeError:
-                            # older pygame may not support border_radius argument for draw.rect on some platforms
-                            pygame.draw.rect(self.display_surface, color, (icon_x, icon_y, icon_size, icon_size))
-
-                        # draw the letter centered in the icon
-                        letter_s = self.font.render(label_char, True, (0, 0, 0))
-                        lx = icon_x + (icon_size - letter_s.get_width()) // 2
-                        ly = icon_y + (icon_size - letter_s.get_height()) // 2
-                        self.display_surface.blit(letter_s, (lx, ly))
-
-                        # draw the descriptive text to the right of the icon
-                        text_x = icon_x + icon_size + 8
-                        text_y = y + (panel_h - txt_surf.get_height()) // 2
-                        self.display_surface.blit(txt_surf, (text_x, text_y))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            # Draw right-side players tab (Minecraft-style)
-            try:
-                self.draw_players_tab()
-            except Exception:
-                pass
-
-            # If local player is frozen (caught), render a freeze overlay
-            if getattr(self.player, '_frozen', False) and not self.game_over:
-                try:
-                    overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
-                    overlay.fill((0, 0, 0, 120))
-                    self.display_surface.blit(overlay, (0, 0))
-                    # show a clearer caught message to the hidder
-                    freeze_surf = self.large_font.render("You are caught", True, (255, 255, 255))
-                    freeze_rect = freeze_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2))
-                    self.display_surface.blit(freeze_surf, freeze_rect)
-                except Exception:
-                    pass
-
-            # If game over, render overlay and exit after 10 seconds
-            if self.game_over:
-                try:
-                    overlay = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
-                    overlay.fill((0, 0, 0, 160))
-                    self.display_surface.blit(overlay, (0, 0))
-                    win_surf = self.font.render(self.winner_text, True, (255, 255, 255))
-                    win_rect = win_surf.get_rect(center=(WINDOW_WIDTH//2, WINDOW_HEIGHT//2))
-                    self.display_surface.blit(win_surf, win_rect)
-                    # after 10 seconds, return to menu
-                    if self.game_over_start and pygame.time.get_ticks() - self.game_over_start >= 10000:
-                        # End the current game and return to menu (caller will handle quitting)
-                        self.running = False
-                except Exception:
-                    pass
             pygame.display.update()
             self.clock.tick(FPS)
 

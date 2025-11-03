@@ -402,6 +402,27 @@ class Player(pygame.sprite.Sprite):
             except Exception:
                 pass
 
+    # Gameplay helpers
+    def freeze(self):
+        """Freeze this player: cannot move or transform; unequip if needed."""
+        try:
+            self._frozen = True
+            self.can_move = False
+            try:
+                self.unequip()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def unfreeze(self):
+        """Clear frozen state and allow movement again."""
+        try:
+            self._frozen = False
+            self.can_move = True
+        except Exception:
+            pass
+
     def set_remote_state(self, pos, state, frame_index, equip_frame=0):
         """Apply remote player's position and animation state.
 
@@ -516,3 +537,14 @@ class Player(pygame.sprite.Sprite):
                 self.direction.x, self.direction.y = 0, 0
             except Exception:
                 pass
+
+
+# Optional role-specialized wrappers for cleaner construction sites.
+class Seeker(Player):
+    def __init__(self, pos, groups, collision_sprites, controlled=True, name=None):
+        super().__init__(pos, groups, collision_sprites, controlled=controlled, isSeeker=True, name=name)
+
+
+class Hidder(Player):
+    def __init__(self, pos, groups, collision_sprites, controlled=True, name=None):
+        super().__init__(pos, groups, collision_sprites, controlled=controlled, isSeeker=False, name=name)
