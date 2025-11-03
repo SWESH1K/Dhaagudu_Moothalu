@@ -48,7 +48,7 @@ end;
 
 ; Fall back definitions when not provided
 #ifndef SrcExe
-#define SrcExe "dist\\DhaaguduMoothalu.exe"
+#define SrcExe "dist\DhaaguduMoothalu.exe"
 #endif
 #ifndef ProjectDir
 #define ProjectDir "."

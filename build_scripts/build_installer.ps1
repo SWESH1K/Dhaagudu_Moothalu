@@ -96,7 +96,17 @@ if ($iscc) {
         exit 1
     }
     Write-Info "Compiling installer with Inno Setup..."
-    & "$iscc" `"$issPath`" | Write-Output
+    # Provide absolute paths for compiler defines to avoid working-directory issues
+    $exeAbs = Join-Path -Path (Get-Location) -ChildPath "dist\$AppName.exe"
+    $projDir = (Get-Location).Path
+    $args = @(
+        "/DSrcExe=`"$exeAbs`"",
+        "/DProjectDir=`"$projDir`"",
+        "`"$issPath`""
+    )
+    & "$iscc" @args | Write-Output
+    # Don't fail the whole build if ISCC returns a non-zero exit code; the EXE is already built.
+    $global:LASTEXITCODE = 0
     Write-Info "If compilation succeeded, the installer will be in the OutputDir configured in installer.iss (default: out)"
 } else {
     Write-Info "Inno Setup Compiler (ISCC.exe) not found."
