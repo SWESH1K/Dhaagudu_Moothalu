@@ -52,16 +52,15 @@ if (Test-Path -Path dist) { Remove-Item -Recurse -Force dist }
 Get-ChildItem -Filter "*.spec" -Path . -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Compose add-data arguments for common asset dirs (PyInstaller expects 'SRC;DEST' on Windows)
-$addData = @()
+# IMPORTANT: Pass options and their values as separate array elements so quoting is correct.
+$pyArgs = @("--noconfirm", "--onefile", "--name", $AppName, "--hidden-import", "server")
+if (-not $Console) { $pyArgs += "--windowed" }
 foreach ($d in @('data','images','sounds')) {
     if (Test-Path -Path $d) {
-        $addData += "--add-data `"$d;${d}`""
+        $pyArgs += @("--add-data", "$d;$d")
     }
 }
 
-$pyArgs = @("--noconfirm", "--onefile", "--name", $AppName, "--hidden-import", "server")
-if (-not $Console) { $pyArgs += "--windowed" }
-$pyArgs += $addData
 $pyArgs += $Entry
 
 Write-Info "Running PyInstaller..."
