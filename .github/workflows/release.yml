@@ -1,0 +1,61 @@
+name: Build and Release Windows EXE
+
+on:
+  # Create a GitHub Release by pushing a tag like v1.2.3
+  push:
+    tags:
+      - "v*"
+  # Or run manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build-windows-exe:
+    name: Build EXE on Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Build EXE with PyInstaller (via script)
+        run: |
+          Set-PSDebug -Strict
+          ./build_scripts/build_installer.ps1 -Console:$false
+
+      - name: Upload build artifact (for debugging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: |
+            dist/DhaaguduMoothalu.exe
+
+      - name: Create or update GitHub Release and upload EXE
+        # On tag pushes this action will create the release if missing and attach the file.
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DhaaguduMoothalu.exe
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create or update a nightly Release (no tag push)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: dist/DhaaguduMoothalu.exe
+          tag: nightly-${{ github.run_number }}
+          name: Nightly ${{ github.run_number }}
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
