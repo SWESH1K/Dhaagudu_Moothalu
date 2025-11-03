@@ -206,7 +206,10 @@ class Player(pygame.sprite.Sprite):
                             try:
                                 if newch:
                                     newch.play(self._walk_sound, loops=-1)
-                                    newch.set_volume(0.6)
+                                    try:
+                                        newch.set_volume(0.6 * float(VOLUME))
+                                    except Exception:
+                                        newch.set_volume(0.6)
                                     self._walk_channel = newch
                                 else:
                                     # fallback to Sound.play (may use shared channels)

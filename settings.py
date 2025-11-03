@@ -17,3 +17,8 @@ DISCOVERY_PORT = 5556
 
 # Local TCP control port for administrative commands (shutdown). Default is port+2.
 CONTROL_PORT = 5557
+
+# Master volume for the game (0.0 = muted .. 1.0 = full). This value is
+# used by the client to set music/sound volumes and is editable from the
+# Settings menu.
+VOLUME = 0.0

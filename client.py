@@ -1020,6 +1020,9 @@ class Game:
                 offset = getattr(self.all_sprites, 'offset', pygame.math.Vector2(0,0))
                 for idx, rp in (getattr(self, 'remote_map', {})).items():
                     try:
+                        # Do not draw nametag while player is transformed/equipped
+                        if getattr(rp, '_equipped', False):
+                            continue
                         name = getattr(rp, 'name', None)
                         if name:
                             nm_s = self.font.render(str(name), True, (255, 255, 255))
@@ -1033,14 +1036,16 @@ class Game:
                         pass
                 # local player
                 try:
-                    lname = getattr(self.player, 'name', None)
-                    if lname:
-                        ln_s = self.font.render(str(lname), True, (200, 220, 255))
-                        lx = self.player.rect.centerx + offset.x - ln_s.get_width()//2
-                        ly = self.player.rect.top + offset.y - ln_s.get_height() - 6
-                        shadow = self.font.render(str(lname), True, (0,0,0))
-                        self.display_surface.blit(shadow, (lx+1, ly+1))
-                        self.display_surface.blit(ln_s, (lx, ly))
+                    # Do not draw local player's nametag while transformed/equipped
+                    if not getattr(self.player, '_equipped', False):
+                        lname = getattr(self.player, 'name', None)
+                        if lname:
+                            ln_s = self.font.render(str(lname), True, (200, 220, 255))
+                            lx = self.player.rect.centerx + offset.x - ln_s.get_width()//2
+                            ly = self.player.rect.top + offset.y - ln_s.get_height() - 6
+                            shadow = self.font.render(str(lname), True, (0,0,0))
+                            self.display_surface.blit(shadow, (lx+1, ly+1))
+                            self.display_surface.blit(ln_s, (lx, ly))
                 except Exception:
                     pass
             except Exception:
